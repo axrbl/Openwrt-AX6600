@@ -1,256 +1,338 @@
-# 🚀 OpenWrt AX6600 / IPQ60xx Router Firmware (Cloud Build + NSS Acceleration)
+# AX6600 自编译固件（axrbl 定制）
 
-OpenWrt / AX6600 / IPQ6010 / JDCloud RE-CS-02 / NSS / Router Firmware / Cloud Build
-> 基于 OpenWrt / ImmortalWrt 的定制固件，适配 JDCloud RE-CS-02（京东云雅典娜 AX6600），集成 NSS 硬件加速优化与 GitHub Actions 自动云编译
-
-[![Stars](https://img.shields.io/github/stars/ones20250/Openwrt-AX6600?style=flat&logo=github&label=Stars)](https://github.com/ones20250/Openwrt-AX6600/stargazers)
-[![Downloads](https://img.shields.io/github/downloads/ones20250/Openwrt-AX6600/total?logo=github&label=%E4%B8%8B%E8%BD%BD%E9%87%8F)](https://github.com/ones20250/Openwrt-AX6600/releases)
-[![Build](https://img.shields.io/github/actions/workflow/status/ones20250/Openwrt-AX6600/QCA-ALL.yml?label=%E7%BC%96%E8%AF%91)](https://github.com/ones20250/Openwrt-AX6600/actions)
-[![Release Date](https://img.shields.io/github/release-date/ones20250/Openwrt-AX6600?label=%E6%9C%80%E6%96%B0%E5%8F%91%E5%B8%83)](https://github.com/ones20250/Openwrt-AX6600/releases)
-
-[👉 进入项目主页](https://github.com/ones20250/Openwrt-AX6600)
----
-
-## ⭐ 项目特点
-
-- 🔥 **云编译构建** - 基于 GitHub Actions 完全自动化编译
-- 📦 **官方支持** - 完美适配京东云雅典娜AX6600（RE-CS-02）
-- 💡 **点阵屏控制** - 内置雅典娜 LED 点阵屏驱动与管理界面（athena-led）
-- 🚀 **开箱即用** - 预装常用网络工具与插件
-- ⚡ **硬件加速** - 原生支持 NSS 硬件加速引擎
-- 📶 **WiFi 稳定** - 无线驱动内存与系统水位线深度调优，7×24 高负载久跑不断流
-- 🌐 **性能优化** - 显著提升 NAT/转发/吞吐性能
-- 🔄 **源码同步** - 自动跟进 OpenWrt/ImmortalWrt 最新上游
-- 🧩 **灵活定制** - 支持自定义编译配置和插件
+> 本仓库 fork 自 [ones20250/Openwrt-AX6600](https://github.com/ones20250/Openwrt-AX6600)，
+> 用于给自用的**京东云 AX6600「雅典娜」**出一版定制固件。
+>
+> **本 README 已按我们的实际情况重写**，与上游原文差异很大：
+> 上游的 WiFi 信道建议、插件清单、默认地址都跟我们的实际不符，照抄会踩坑。
+> 上游原文可用 `git show origin/main:README.md` 查看。
 
 ---
 
-## 📥 快速开始
+## 1. 我们对上游做了什么（变更记录）
 
-### 1️⃣ 下载固件
+按时间倒序。这些改动**全部只存在于我们 fork 的 `main` 分支**，不会推给上游作者；
+若某条对上游有价值，就从 fork 开新分支单独挑出来发 PR。
 
-| 版本 | 下载入口 | 适合场景 |
-|------|----------|----------|
-| 🍃 `PURE` 纯净版 | 🎯 **[👉 下载最新 PURE 固件](https://github.com/ones20250/Openwrt-AX6600/releases?q=PURE&expanded=true)** | 轻量稳定，日常推荐，插件按需自装 |
-| 🚀 `PLUS` 版 | 🎯 **[👉 下载最新 PLUS 固件](https://github.com/ones20250/Openwrt-AX6600/releases?q=PLUS&expanded=true)** | OpenClash / PassWall2 / Docker / AdGuard Home 开箱即用 |
+| # | 改动 | 落点 | 说明 |
+|---|---|---|---|
+| 5 | 重写本 README | `README.md` | 修正 WiFi 信道建议、插件清单、默认地址；记录远端结构与踩坑 |
+| 4 | 移除 Docker 全家桶（9 项） | `Config/GENERAL_AX6600_PLUS.txt` | 所有服务都用原生二进制；**保留 `kmod-ikconfig`**（`/proc/config.gz`） |
+| 3 | 关 PassWall2（11 项）+ geo 数据；关打印服务；加 aria2 / btrfs | 同上 | 只用 OpenClash |
+| 2 | `PROFILE: PURE → PLUS`；加 `push` 触发；追加定制包组 | `.github/workflows/QCA-ALL.yml`、`GENERAL_AX6600_PLUS.txt` | 让 push 改 `Config/**` 即自动编译 |
+| 1 | `kmod-usb-net-{rndis,cdc-ncm,cdc-ether,huawei-cdc-ncm}` → `=y` | `Config/GENERAL_AX6600.txt` | 手机 USB 共享上网 |
 
-> ⭐ 固件对你有用的话，顺手点个 Star —— 这是对持续维护最好的支持！
+**定制一律追加在 `Config/GENERAL_AX6600_PLUS.txt` 末尾** —— 因为 `.config` 是顺序拼接、后写覆盖先写（见 §6）。
 
-> 💡 打开后列表**最上方**即为该版本最新固件；也可浏览 [全部 Releases](https://github.com/ones20250/Openwrt-AX6600/releases)。
+## 2. 硬件
 
-📦 **刷机救砖全家桶**
-👉 **[点击下载刷机文件](https://github.com/ones20250/Openwrt-AX6600/releases/tag/Router-Flashing-Files)**
+| 项 | 值 |
+|---|---|
+| 设备 | 京东云 AX6600「雅典娜」 |
+| board / 平台 | `jdcloud,re-cs-02`，`qualcommax/ipq60xx` |
+| SoC / 内存 | Qualcomm IPQ6010 / 1 GB |
+| eMMC | `mmcblk0` ≈ 230 GiB（256 GB 级） |
+| U-Boot | 社区「不死 U-Boot」`2024.05.10_12:22:07` — **不要重刷** |
+| 分区表 | 双分区 `2048M` rootfs（no-last-partition）；`mmcblk0p18` = rootfs；overlay 走 `/dev/loop0` 2 GB |
+| ⚠️ storage 分区 | **尚未创建**（no-last-partition 丢掉了最后那个大分区），需用 `sgdisk` 新建 |
 
-> 包含：不死 U-Boot（亚瑟/雅典娜通用）、双分区 GPT 分区表、原厂还原固件、USB 9008 救砖工具、TTL 接线图、图文刷机教程
+## 3. 我们用到的固件能力
 
----
+设备用途决定了包里该有什么：
 
-## 📋 固件说明
+1. **公寓路由器** — LAN 与家里保持一致 `172.16.0.1/24`
+2. **WAN 用手机 USB 共享上网** — 依赖 USB RNDIS/NCM 系列内核模块
+3. **备份服务器 + 私有 git mirror** — 用上 eMMC 那 ~226 GB 空间
 
-| 说明 | 详情 |
-|------|------|
-| **编译时间** | 显示的时间为编译开始时间，用于对应上游源码版本 |
-| **版本划分** | 默认同时构建 `PURE` 纯净版与 `PLUS` 版 |
-| **基础功能** | 纯净版保持当前轻量配置，包含完整网络功能栈 |
-| **扩展插件** | Plus 版额外集成 OpenClash、PassWall2、Docker / Dockerman、AdGuard Home、DDNS、ttyd 终端、UPnP 等常用组件，也可通过自定义配置 `.config` 文件增加插件 |
-| **硬件平台** | 基于 QUALCOMMAX（IPQ6010）架构 |
-| **性能优化** | 针对 IPQ6010 平台进行网络性能调优 |
+## 4. 相对上游的改动（我们做的）
 
-### 固件版本
+### 3.1 新增
 
-| 版本 | 适合人群 | 预置内容 |
-|------|----------|----------|
-| `PURE` 纯净版 | 希望系统轻量、稳定，按需自行安装插件的用户 | 保持当前配置，预装基础网络与常用管理插件 |
-| `PLUS` 版 | 希望刷完即用常见扩展服务的用户 | 在纯净版基础上增加 OpenClash、PassWall2、Docker / Dockerman、AdGuard Home、DDNS、ttyd 终端、UPnP，以及分区扩容（partexp）、网络唤醒（wolplus）等实用插件 |
+| 类别 | 包 |
+|---|---|
+| mesh VPN | `netbird`（与公司那套一致；无 LuCI，CLI 配） |
+| eMMC 体检 | `mmc-utils`（寿命 / EOL） |
+| 磁盘管理与健康 | `luci-app-diskman`、`smartmontools`、`hdparm`、`luci-app-hd-idle` |
+| 备份 / mirror | `rsync`、`restic`、`zstd`、`git` |
+| 文件共享与浏览 | `luci-app-cifs-mount`、`luci-app-filemanager` |
+| 运维 | `luci-app-vnstat2`（流量统计）、`luci-app-commands`（LuCI 跑脚本） |
+| 下载 | `aria2`、`luci-app-aria2` |
+| 数据分区快照 | `kmod-fs-btrfs`、`btrfs-progs` |
+| USB 手机共享 | `kmod-usb-net-{rndis,cdc-ncm,cdc-ether,huawei-cdc-ncm}` → `=y` |
+| 排查用 | `kmod-ikconfig`（保留 `/proc/config.gz`） |
 
-> 💡 Releases 中的文件名会包含 `pure` 或 `plus`，请按需求下载对应版本。
+### 3.2 删除
 
-### 文件命名与附件说明
+| 类别 | 包 | 原因 |
+|---|---|---|
+| Docker 全家桶 | `docker`、`dockerd`、`docker-compose`、`luci-app-dockerman`、`luci-lib-docker`、`cgroupfs-mount`、`tini`、`kmod-nf-ipvs`、`kmod-veth` | 所有服务都用原生二进制跑，Docker 是纯负担 |
+| PassWall2 生态 | 11 项 | 只用 OpenClash |
+| 打印服务 | `kmod-usb-printer`、`p910nd`、`luci-app-p910nd` | 不需要 |
+| geo 数据 | `v2ray-geoip`、`v2ray-geosite`、`v2ray-geoview` | 已核实 OpenClash 不依赖 |
 
-Releases 页面每个版本包含以下文件（PURE 与 PLUS 分开发布，Release tag 中同样含版本字样）：
+> ⚠️ **上游 Release 说明里那句 "预装 OpenClash、PassWall2、Docker/Dockerman…" 是过期文案**，
+> 由 `WRT-CORE.yml` 的 `WRT_PROFILE_DESC` 生成，还没同步我们的删减。以本文件为准。
 
-| 文件 | 说明 |
-|------|------|
-| `源码作者-分支-pure/plus-设备型号-时间.bin` 等 | 固件本体；文件名带 `factory` 用于从原厂固件首次刷入，带 `sysupgrade` 用于 OpenWrt/ImmortalWrt 系统内升级 |
-| `Config-配置-版本-作者-分支-时间.txt` | 本次编译使用的完整 `.config`，便于复现构建或二次定制 |
-| `Packages-配置-版本-作者-分支-时间.txt` | 外部插件（OpenClash / PassWall2 及依赖 feed）的仓库、分支与 commit 记录，仅 `PLUS` 版生成，便于排查上游变更 |
+## 5. ⚠️ WiFi 信道：不要照上游设
 
----
+**这是本设备最容易踩的坑。** ath11k 在本机上的监管域很反直觉，实测（以 `iw phy <phy> channels` 为准）：
 
-## 🛠️ 刷机指南
+| 射频 | 归属 | 实测可用 | ⚠️ 禁用 |
+|---|---|---|---|
+| `phy0` | AHB / radio0（5G-1，4×4） | `149–169`、`100–144`(DFS) | **36–48 全禁用** |
+| `phy2` | PCIe / radio2（5G-2，2×2） | `36–48`（+52–64 DFS） | **100 以上全禁用** |
+| radio1 | 2.4G | `11` / `HE20` | — |
 
-> ⚠️ **重要提示：** 以下操作涉及 U-Boot 和分区修改，**请务必先备份重要数据**，谨慎操作！
+**正确配置：**
 
-### 详细教程
-📖 **[完整刷机救砖教程 →](Docs/刷机救砖教程.md)**（开 SSH / 备份分区 / 刷 U-Boot / 9008 救砖全流程，推荐新手通读）
+| WiFi | 信道 | 带宽 |
+|---|---|---|
+| 2.4G | `11` | 20 MHz |
+| 5G-1（radio0，4×4） | **`149`** | 80 MHz |
+| 5G-2（radio2，2×2） | **`36`** | 80 MHz |
 
-### 刷机前必读
+通用：地区 `CN`、加密 `WPA2-PSK`（CCMP）。
 
-1. **备份所有数据**
-   ```bash
-   # SSH 连接到设备
-   ssh root@192.168.1.1
+> 上游 README 建议 5G-1 用信道 `44`、5G-2 用 `149`。**在这台设备上会导致 AP 起不来**
+> （hostapd 报 `not allowed for AP mode`）。上游那张表是通用建议，不适用于本机的 ath11k 监管域。
 
-   # 备份整个 U-Boot 分区
-   dd if=/dev/mtd0 of=/tmp/uboot.bin
+### 为什么不把信道设成 `auto`（结论：就用固定 149 / 36）
 
-   # 备份分区表
-   dd if=/dev/mtd1 of=/tmp/partition_table.bin
-   ```
-2. **验证文件完整性**
+`auto` 就是 OpenWrt 的 **ACS**（Automatic Channel Selection）。它能"自动避让冲突"这个说法**只对一半**：
 
-   每个 Release 附带 `sha256sums.txt` 校验文件，将其与固件下载到同一目录后执行：
-   ```bash
-   # Linux / macOS
-   sha256sum -c sha256sums.txt --ignore-missing
-   ```
-   ```powershell
-   # Windows：计算固件哈希，与 sha256sums.txt 中对应行比对
-   certutil -hashfile 固件文件名.bin SHA256
-   ```
-3. **准备恢复方案**
-   - 保留 TTL 串口工具
-   - 准备原厂固件备份
-   - 了解救砖流程
+| 机制 | 触发时机 | 会不会自动换信道 |
+|---|---|---|
+| ACS | **仅启动/重启 wifi 时** | 选**一次**，之后一直钉在那个信道上 |
+| DFS 雷达检测 | **仅限 DFS 信道**（100–144），且**只对雷达信号** | ✅ 会立刻撤离并换信道（发 CSA，客户端掉线重连） |
+| 「运行中信道变拥挤了」 | 邻居新加了个 AP | ❌ **没有任何机制会响应** |
 
-### 刷机步骤
+关键限制，别抱期待：
 
-1. **启用 SSH 访问**
-   - 进入旧版本固件管理后台
-   - 启用 SSH 服务
+- **ACS 不做运行中持续监测。**它避得开开机时已有的冲突，避不开运行中新增的冲突。
+- **"别人和我抢同一个信道"不会触发任何自动调整。**hostapd 没有"持续频谱感知 + 择优切换"这个功能；
+  只有**雷达**能让它自己跳信道。
+- 想真的运行中自动换信道，只能自己写脚本定时 `iw scan` 再判优切换——但**换信道会让所有客户端掉线重连**，
+  对一台 7×24 的路由器 + 备份服务器来说得不偿失。**本仓库不这么做。**
 
-2. **备份分区**（二选一）
-   - 通过 SSH 备份分区数据
-   - 或使用 TTL 串口备份（更安全）
+那为什么不开 `auto`？因为**在这台设备的监管域下，`auto` 会把射频选到 DFS 信道上**：
 
-3. **刷入 U-Boot**
-   - 安装不死 U-Boot（防砖）
-   - 更新双分区 GPT 分区表
+| 射频 | `auto` 可能选到 | 风险 |
+|---|---|---|
+| `phy0`（radio0，5G-1） | `149–169` 或 **`100–144`(DFS)** | ⚠️ 选到 DFS 要做 **60 秒 CAC**（静默监听雷达），期间 AP 完全不可用；<br>运行中误判雷达则 **AP 直接停播**，5G 短暂断流 |
+| `phy2`（radio2，5G-2） | `36–48` 或 **`52–64`(DFS)** | ⚠️ 同上 |
 
-4. **创建存储分区**
-   - 新建 storage 分区
-   - 恢复跑分分区数据
+**`149` 与 `36` 都是非 DFS 信道 → 永远不用 CAC、永远不会被雷达踢下线。**
+对这台要长期在线的设备，**可用性 > 那点理论抗干扰收益**。另外 `auto` 每次重启结果可能不同，
+那些只认 BSSID 的智能家居设备会更难受。
 
-5. **刷入固件**
-   - 从 Releases 下载最新固件（首刷选 `factory`，升级选 `sysupgrade`）
-   - 通过 U-Boot Web 界面刷入
+**想换信道时：手动勘测后定死，不要交给 `auto`。**
 
-### U-Boot 固件仓库
+```bash
+# 在路由器上跑，看哪个信道最空（会短暂影响自身 AP）
+iw dev wlan0 scan | grep -E "SSID|channel" | sort | uniq -c | sort -rn
+```
 
-| 平台 | 仓库地址 | 说明 |
-|------|---------|------|
-| **eMMC 版本** | [chenxin527/uboot-ipq60xx-emmc-build](https://github.com/chenxin527/uboot-ipq60xx-emmc-build) | eMMC 存储设备专用 |
-| **NOR Flash 版本** | [chenxin527/uboot-ipq60xx-nor-build](https://github.com/chenxin527/uboot-ipq60xx-nor-build) | NOR Flash 存储设备专用 |
+**如果哪天真想用"自动但零 DFS 风险"**：把 ACS 的信道范围限制在非 DFS 段，
+即 `/etc/config/wireless` 里给对应 radio 加 `option channels '149 153 157 161 165'`（radio0）
+或 `option channels '36 40 44 48'`（radio2），再设 `option channel 'auto'`。
+但如上所述，非 DFS 段本身只有 4–5 个信道，挑不出多少花来，**仍推荐固定 149 / 36**。
 
-> 💡 **提示：** U-Boot 版本选择需与您的设备硬件配置相匹配，错误选择会导致设备无法启动！
+> 附：`160MHz` 不建议开。`phy0` 若开 160MHz 需要 `149–177`，而 `phy2` 的 160MHz 会横跨
+> `36–64`（含 DFS 52–64）→ 又把雷达风险引回来。用 80MHz 即可。
 
-### 常见风险及预防
+## 6. 编译机制
 
-| 风险 | 症状 | 预防方法 |
-|------|------|---------|
-| **U-Boot 错误** | 设备无法启动 | 使用不死 U-Boot，备份原件 |
-| **分区错误** | 系统无法识别 | 使用正确的 GPT 分区表 |
-| **断电** | 刷机中断 | 使用 UPS 或稳定电源 |
-| **固件损坏** | 开机无响应 | 验证 SHA256 后再刷入 |
-
-### WiFi 推荐设置（刷机后调优）
-
-雅典娜为三频机型，共三个 WiFi：2.4G（2×2，574Mbps）、5.2GHz 游戏频段 5G-1（4×4，4804Mbps）、5.8GHz 影音频段 5G-2（2×2，1201Mbps），信道和带宽按各自频段分别设置：
-
-| WiFi | 信道 | 带宽 | 说明 |
-|------|------|------|------|
-| 2.4G（2×2） | `11` | `20MHz` | 抗干扰优先，拥挤环境下 20MHz 更稳 |
-| 5G-1 游戏频段（4×4） | `44` | `160MHz` | 4×4 满血跑 160MHz 可达 4804Mbps；若无法开启或断流，回退 `80MHz` |
-| 5G-2 影音频段（2×2） | `149` | `80MHz` | `149` 起在 US 下功率上限最高，非 DFS 无雷达断流 |
-
-三个 WiFi 通用的设置：
-
-| 项 | 推荐值 | 说明 |
-|----|--------|------|
-| 地区 | `US` | 可用信道多、功率上限高，推荐信道在 US 下均为非 DFS |
-| 发射功率 | `24 dBm` | US 法规内的高功率档 |
-| 加密 | `WPA2-PSK`，算法 `CCMP` | 兼容性最稳组合，老设备无障碍接入 |
-
----
-
-## 🧱 构建机制（PURE / PLUS 如何隔离）
-
-- 两个版本由工作流参数 `WRT_PROFILE` 区分，所有 Plus 版逻辑（额外配置、feed、插件克隆）均由该条件隔离，**纯净版产物不受 Plus 版任何改动影响**。
-- Plus 版插件来源唯一：LuCI 插件本体由 `Scripts/Packages.sh` 克隆到 `package/`（优先级高于 feeds），依赖包（xray、sing-box 等）由 `passwall_packages` feed 提供，避免同名包双重定义。
-- Plus 版配置 `Config/GENERAL_AX6600_PLUS.txt` 追加在通用配置之后，按 kconfig 规则覆盖纯净版关闭的选项（如 Docker 所需内核模块、`dnsmasq-full`）。
-- 编译缓存（ccache / 工具链）与版本无关，PURE 与 PLUS 共享同一份，不额外占用缓存配额。
-
-### 版本与验证建议
-
-- `PURE`：推荐作为日常稳定版，保持当前轻量配置。
-- `PLUS`：Plus 版会额外集成 OpenClash、PassWall2、Docker / Dockerman、AdGuard Home、DDNS、ttyd、UPnP 等，固件体积和运行资源占用都会明显高于纯净版。
-- 手动测试时可在 `WRT-TEST` 工作流选择 `PROFILE=PURE` 或 `PROFILE=PLUS`；建议 Plus 版发布前至少先用 `TEST=true` 生成最终 `.config`，再用完整编译确认上游插件依赖没有变化。
-- Release 会额外上传 `Packages-*.txt` 记录 Plus 版外部插件仓库、分支和 commit，方便排查 OpenClash / PassWall2 上游变更导致的编译问题。
-
-> ⚠️ Plus 版依赖外部插件仓库和上游 feeds，若上游调整包名或依赖，可能需要同步更新 `Config/GENERAL_AX6600_PLUS.txt`。
-
-### PLUS 版使用提示
-
-- **AdGuard Home 首次启用**：出厂默认关闭。启用服务后访问 `http://路由器IP:3000` 完成安装向导，向导中 **DNS 监听端口请填 `5553`**（`53` 已被系统 dnsmasq 占用，填 53 会报错）；完成后在 LuCI「网络 → DHCP/DNS」的「DNS 转发」中填入 `127.0.0.1#5553` 并勾选「忽略解析文件」，广告过滤即对全局生效。
-- **代理插件二选一**：OpenClash 与 PassWall2 工作机制相同（接管 DNS + 透明代理规则），同时启用会互相抢占，轻则其中一个失效、分流错乱，重则断网，请只启用其中一个，切换前先停用当前插件。
-- **Docker 存储去向**：Docker 数据默认写入系统分区，容易撑爆。建议先用「分区扩容（partexp）」将空闲 eMMC 挂载为独立分区，再在 Docker 设置中把存储路径指向该分区。
-
-## 📂 项目结构
-
-| 目录/文件 | 用途 | 说明 |
-|----------|------|------|
-| `.github/workflows/` | CI/CD 自动编译 | 定义 GitHub Actions 工作流，实现云端自动构建 |
-| `Scripts/` | 编译脚本 | 包含插件拉取、自定义设置等辅助脚本 |
-| `Config/` | 编译配置 | 存放 OpenWrt `.config` 配置文件（含 `GENERAL_AX6600_PLUS.txt` Plus 版增量配置） |
-| `Docs/` | 文档 | 刷机救砖教程等图文文档 |
-
----
-
-## 🔗 上游源码与依赖
-
-| 版本 | 仓库地址 | 说明 |
-|------|---------|------|
-| **官方版** | [immortalwrt/immortalwrt](https://github.com/immortalwrt/immortalwrt.git) | ImmortalWrt 官方仓库 |
-| **高通专用版** | [ones20250/immortalwrt_ipq](https://github.com/ones20250/immortalwrt_ipq.git) | IPQ 平台优化版本，定期同步上游并验证后构建 |
-
----
-
-## 🚀 自定义编译
-
-### 修改编译配置
-
-| 配置文件 | 作用范围 |
-|----------|----------|
-| `Config/GENERAL_AX6600.txt` | 通用配置，PURE / PLUS 两个版本共用 |
-| `Config/GENERAL_AX6600_PLUS.txt` | Plus 版增量配置，仅 PLUS 生效 |
-| `Config/IPQ60XX-WIFI-YES.txt` | 设备与平台基础配置 |
+- `.config` = **按顺序拼接**：
+  `Config/IPQ60XX-WIFI-YES.txt` + `Config/GENERAL_AX6600.txt` + `Config/GENERAL_AX6600_<PROFILE>.txt`
+  → **后写覆盖先写**（Kconfig 最后一次赋值生效）。**我们的定制一律追加在 `GENERAL_AX6600_PLUS.txt` 末尾。**
+- **profile 只能是 `PURE` 或 `PLUS`**：`WRT-CORE.yml` 里有 `case` 判断，其它值 `exit 1`；
+  且 `Scripts/Packages.sh` 与 `WRT-CORE.yml` 两处都用 `if [[ "$WRT_PROFILE" == "PLUS" ]]` 门控
+  OpenClash / PassWall2 / partexp / viking 的源码 clone 和 `passwall_packages` feed。
+  → **只要用 OpenClash 就必须叫 `PLUS`，别改名。**
+- 编译完会 `rm -rf bin/targets/**/packages`，**Release 里只有固件、没有独立 kmod**。
+  → **kmod 必须随固件集成**（ABI hash 会变，刷完事后装不了）。
+- 产物命名：`<源码owner>-<分支>-<profile小写>-<设备>-<时间>.<ext>`
+- **构建缓存**：cache key 含源码 commit，**fork 无法复用上游作者的缓存**。
+  实测首次冷编译约 **2 小时 12 分**（其中 `Compile Firmware` 约 2 小时）；有缓存后明显更快。
 
 ### 触发编译
 
-编译不会随代码提交自动触发，需通过以下方式之一：
+| 方式 | 说明 |
+|---|---|
+| `push` 到 `main` 且改动 `Config/**` | **自动触发**（实测生效） |
+| Actions → `QCA-ALL` → Run workflow | 手动全量 |
+| Actions → `WRT-TEST`，`TEST=true` | **只生成最终 `.config`，不编译**。<br>用来验证包名是否被 `make defconfig` **静默丢弃** |
 
-- **手动全量编译**：Actions → `QCA-ALL` → Run workflow，同时构建 PURE 与 PLUS 两个版本。
-- **配置验证**：Actions → `WRT-TEST`，可选择 `PROFILE` 并勾选 `TEST=true`，仅生成最终 `.config` 不编译固件，几分钟出结果。
-- **每日自动编译**：每天早上 6 点（北京时间）由 `Auto-Clean` 清理旧产物后自动触发。
+> 💡 **`CONFIG_PACKAGE_xxx=y` 只是意图，不是保证。**
+> 如果该包在 feeds 里不存在，`make defconfig` 会静默丢掉它——编译照样成功、固件照样出，但里面没这个东西。
+> **唯一真相是 Release 里的 `.manifest`**，或者用 `TEST=true` 生成的最终 `Config-*.txt` 反查。
 
----
+### 默认值（在 `QCA-ALL.yml` 里）
 
-## 📊 固件特性对比
+| 变量 | 当前值 | 说明 |
+|---|---|---|
+| `WRT_NAME` | `OWRT` | 主机名 |
+| `WRT_SSID` / `WRT_WORD` | `OWRT` / `12345678` | WiFi |
+| `WRT_IP` | `192.168.10.1` | **管理地址**（不是 192.168.1.1；也不是我们想要的 172.16.0.1） |
+| `WRT_THEME` | `bootstrap` | 主题 |
 
-| 特性 | 原厂固件 | 本项目固件 |
-|------|---------|----------|
-| **OpenWrt 版本** | 不支持 | ✅ 最新版 |
-| **NSS 硬件加速** | ⚠️ 部分支持 | ✅ 完全支持 |
-| **网络性能** | 基础 | ✅ 优化增强 |
-| **自定义插件** | ❌ 不支持 | ✅ 完全支持 |
-| **定期更新** | ❌ 不定期 | ✅ 自动更新 |
-| **开源透明** | ❌ 闭源 | ✅ 开源公开 |
+> ⚠️ **刷 `factory.bin` 会清除配置**（20240510 版 u-boot 起，刷固件即清配置数据）。
+> 想让刷完直接就是 `172.16.0.1` / `Password01!`，**先改 `WRT_IP` / `WRT_WORD` 再重编**。
+> 走系统内 `sysupgrade` 则会保留现有配置。
 
----
+## 7. 仓库与远端（重要）
 
-## ⚠️ 免责声明
+本仓库同时扮演两个角色，用**两个远端**区分：
 
-刷机有风险，操作需谨慎。
+| 远端 | 指向 | 角色 |
+|---|---|---|
+| `origin` | `git@github.com:ones20250/Openwrt-AX6600.git` | **上游原始出处**，只用来跟进更新 |
+| `upstream` | `git@github.com:axrbl/Openwrt-AX6600.git` | **我们自己的 fork**，我们推送到这里，CI 也在这里跑 |
 
-本项目固件仅供学习与研究使用，请确认设备型号匹配并提前备份数据。
-因刷机造成的设备损坏或数据丢失，作者不承担任何责任。
+> 命名确实容易混：**`origin` = 原始作者**，**`upstream` = 我们自己的**。
+> 这是刻意按"要保持同步的那一方叫 origin"来定的。记住：
+> **`origin` 是只读的源头，`upstream` 是我们的家。**
+
+分支策略：**只有 `main` 一条分支，定制直接做在 `main` 上。**
+
+### 跟进上游更新
+
+```powershell
+$git = "C:\Users\raxia\Tools\PortableGit\cmd\git.exe"
+$repo = "C:\Users\raxia\devops\Openwrt-AX6600"
+
+# 1) 取上游最新
+& $git -C $repo fetch origin
+
+# 2) 看上游带来了什么
+& $git -C $repo log --oneline HEAD..origin/main
+
+# 3) 合并进我们的 main（因为我们在 main 上定制，这里可能产生冲突）
+& $git -C $repo merge origin/main
+
+# 4) 推回我们自己的 fork（注意是 upstream，不是 origin）
+& $git -C $repo push upstream main
+```
+
+> ⚠️ 因为定制和上游更新都在 `main` 上，第 3 步**可能出现冲突**，
+> 典型冲突点是 `Config/GENERAL_AX6600_PLUS.txt` 和 `.github/workflows/`。
+> 若上游改动碰到了我们定制的那些行，需要手工合。
+>
+> 想避免冲突的话，正解是"上游纯净镜像 + 定制单独分支"，
+> 但当前选择是单分支，接受偶发冲突。
+
+### 推送目标别搞错
+
+`main` 的 tracking 指向 `origin/main`（为了 `fetch`/`log` 方便）。而 Git 的 `push` 默认跟随 tracking 远端，
+所以**裸 `git push` 会试图推向上游**——会失败（我们对 `ones20250` 没有写权限，是明确报错，不会静默推错地方）。
+
+⚠️ 注意：**`--set-upstream` 不要用来"修"这个**，那会把 tracking 改成 `upstream/main`，
+反而让 `git fetch` / `git log HEAD..origin/main` 这些跟进上游的常用操作变得别扭。
+
+为此 `setup-remotes.ps1` 装了别名，推送还是四个字母：
+
+```powershell
+# 看上游有没有新提交，并列出差异
+git syncf
+
+# 把上游更新合进我们的 main（可能有冲突）
+git merge origin/main
+
+# 推我们自己的 fork（等价于 git push upstream main），触发 CI
+git pushf
+```
+
+完整写法（不用别名时）：
+
+```powershell
+# 拉取同步（无需参数，因为 tracking 指向 origin/main）
+& $git -C $repo pull
+
+# 推送必须显式指定 upstream
+& $git -C $repo push upstream main
+```
+
+## 8. 刷机
+
+📖 完整流程见 [`Docs/刷机救砖教程.md`](Docs/刷机救砖教程.md)（开 SSH / 备份分区 / 刷 U-Boot / 9008 救砖）。
+
+### 关键约束
+
+- **本 u-boot 支持 kernel 为 6 MB 的 OP `factory.bin`**（如大雕 QWRT 那种），
+  以及官方原厂固件 `JDCOS-JDC02`。
+- 官方 ImmortalWrt 的 `sysupgrade.bin`(tar) 和 `initramfs-uImage.itb` **不能用**。
+- **我们的 `squashfs-factory-*.bin` 就是 u-boot 能吃的格式**，可以直接刷。
+  （它约 80 MB，别和"kernel 6 MB"混淆：6 MB 指 kernel 分区，整包尺寸可以更大。）
+- u-boot webui 入口：`/` = 固件（字段名 `firmware`）；`/img.html` = GPT/IMG（字段名 **`img`**）；
+  `/art.html`、`/cdt.html`、`/uboot.html`。**写入成功 = 绿灯亮 3 秒。**
+- 进 failsafe：**按住 reset 上电** → 红灯闪 5 次 → 变蓝 → webui 在 `192.168.1.1`。
+- 若进不去 u-boot webui：把网卡速率手动改成 **10M 全双工**再试（网卡与 u-boot 驱动兼容性问题），刷好改回自动协商。
+
+### 两个文件怎么选
+
+| 文件 | 用途 |
+|---|---|
+| `*-factory-*.bin` | 经 **u-boot webui** 刷（会清配置） |
+| `*-sysupgrade-*.bin` | 已在 OpenWrt/ImmortalWrt 上，**系统内升级**（保留配置） |
+
+### 刷机前
+
+```powershell
+# 校验下载完整性（Windows）
+certutil -hashfile <固件文件名>.bin SHA256
+# 与 Release 里的 sha256sums.txt 对应行比对
+```
+
+## 9. 刷完的待办
+
+1. **建 storage 分区**：
+   ```bash
+   sgdisk -e -n 0:0:0 -c 0:storage -t 0:1B1720DA-A8BB-4B6F-92D2-0A93AB9609CA -p /dev/mmcblk0
+   ```
+   然后 `mkfs.btrfs`（建议建 `@data` 子卷，方便快照）
+2. **配 netbird**（无 LuCI）：`netbird up --setup-key <setup key>`；
+   init 脚本 `/etc/init.d/netbird`，配置在 `/root/.config/netbird/`
+3. **配 USB RNDIS WAN**：手机开「USB 共享网络」→ 出现 `usb0` →
+   把 `network.wan` 的 device 指过去 + 配 firewall zone
+4. **Samba / 备份 / git mirror**：Forgejo 直接放 **arm64 单文件**即可
+   （无 OpenWrt 包、不需要 Docker、不需要重编固件）
+
+## 10. 已知坑
+
+### 设备侧
+
+- **绝对不要用 `apk add --force-broken-world`** — 会删掉 220 个包（内核 + kmod）把系统搞挂。
+- `/overlay`、`/opt/docker` 之类占位符**不能直接 `rm`**（会连数据一起删），要用 `mknod <path> c 0 0` 重建。
+- `no-last-partition` 分区表刷完后，**最后那个大分区要自己建**。
+- 这版固件**默认管理地址是 `192.168.10.1`**（不是 `192.168.1.1`）。
+
+### 编译侧
+
+- **kmod 必须随固件集成**，Release 不含独立 kmod 包。
+- `make defconfig` 会静默丢弃 feeds 里不存在的包 → **必须用 `.manifest` 或 `TEST=true` 验证**。
+- `WRT_PROFILE` 不能改名，只能 `PURE` / `PLUS`。
+
+### 网络 / 传输
+
+- **公司网络会 reset GitHub 的 https git 传输**（`Recv failure: Connection was reset`）→ **用 SSH**：
+  `git@github.com` 或 `ssh.github.com:443`。本仓库远端已全部用 SSH。
+- 未认证 GitHub API 限流 **60 次/小时**。
+
+## 11. 文档
+
+| 文件 | 内容 |
+|---|---|
+| [`Docs/刷机救砖教程.md`](Docs/刷机救砖教程.md) | 开 SSH / 备份分区 / 刷 U-Boot / 9008 救砖 |
+| `HANDOFF.md` | 上一轮排查的详细交接（**本地未跟踪文件，不要 commit**） |
+| `Config/GENERAL_AX6600_PLUS.txt` | 我们全部定制的落点 |
+
+## 12. 上游
+
+| 仓库 | 关系 |
+|---|---|
+| [ones20250/Openwrt-AX6600](https://github.com/ones20250/Openwrt-AX6600) | 本仓库的 **fork 来源**，即 `origin` |
+| [ones20250/immortalwrt_ipq](https://github.com/ones20250/immortalwrt_ipq) | **CI 编译时拉取的固件源码**（`QCA-ALL.yml` 的 `SOURCE` 矩阵），与 fork 关系无关 |
+
+## 13. 免责声明
+
+刷机有风险。本固件仅供自用与学习研究。请确认设备型号匹配，并提前备份数据。
