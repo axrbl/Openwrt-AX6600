@@ -2,19 +2,21 @@
 #
 # AX6600 无线默认值兜底（首次启动时由 /etc/uci-defaults 机制执行一次）
 #
-# 为什么需要它：信道默认值来自各设备的 DTS（生成 /etc/board.json 的
-# default_channel）。上游给 phy0（5G-1）配的是 100，但本机 phy0 实测禁用
-# 36-144、只允许 149-165，导致 hostapd 直接启动失败：
-#   "Hardware does not support configured channel"
-#   "Frequency 5500 (primary) not allowed for AP mode"
-# 5G-1 射频完全不工作。改 DTS 需要猜上游文件路径与语法，不够稳；
-# 这里在首次启动时按【频段】而不是按 radio 名字来纠正，最稳。
+# 策略：三个射频都用 ACS（auto），但【每个都必须带 channels 白名单】。
+#   - 2.4G：白名单 1-13。必须排除 14 —— CN 监管域下 14 是"可用"的，
+#     ACS 实测会选它（因为与 1-13 完全隔离、最不拥挤），但信道 14 只能跑
+#     802.11b，现代 hostapd 直接失败：
+#       Disable OFDM/HT/VHT/HE/EHT on channel 14
+#       IEEE 802.11 Failed to prepare rates table.
+#       interface state ACS->DISABLED / AP-DISABLED
+#     2.4G 射频彻底宕机。
+#   - 5G 低段（PCIe 射频，36-48 可用）：白名单 36 40 44 48。
+#     必须排除 52-64 —— 那些是 DFS，要 60 秒 CAC，还会被雷达踢下线。
+#   - 5G 高段（AHB 射频，仅 149-165 可用）：白名单 149 153 157 161。
+#     排除 165：HE80 在 165 上中心信道会算到不存在的 171，可能降级带宽。
 #
-# 频段 -> 信道：5g 低段(radio2/phy2) 用 36；5g 高段(radio0/phy0) 用 149；
-#               2g 用 1。判据是该频段的可用信道，而不是名字。
-#
-# 同时设定发射功率：20 平单间，14 dBm (≈25mW) 足够，避免过大造成底噪与
-# 邻频干扰。上游从未设置 txpower，驱动默认 24-27 dBm 属过量。
+# 另外强制发射功率：20 平单间，14 dBm (≈25mW) 足够。
+# 上游从未设置 txpower，驱动默认 24-27 dBm 属过量。
 
 . /lib/functions.sh
 
@@ -25,66 +27,91 @@ changed=0
 
 config_load wireless
 
+# 按频段（以及 5G 低/高段）给出白名单
+channels_for() {
+	local band="$1"
+	local path="$2"
+	local name="$3"
+	local idx="$4"
+	case "$band" in
+		2g) echo "1 2 3 4 5 6 7 8 9 10 11 12 13" ;;
+		5g)
+			case "$path" in
+				*pcie*) echo "36 40 44 48"; return ;;
+			esac
+			# path 缺失时的兜底：本机 5G 射频正好两个，phy0=radio0 是高段
+			# （仅 149-165 可用），phy2=radio2 是低段。所以 radio0 固定高段，
+			# 其余 5G 中的一个视为低段。
+			case "$name" in
+				radio0) echo "149 153 157 161" ;;
+				*)      echo "36 40 44 48" ;;
+			esac
+			;;
+		*) echo "" ;;
+	esac
+}
+
 set_radio() {
 	local cfg="$1"
 	local band="$2"
 	local path="$3"
+	local idx="$4"
 
-	local cur_ch cur_tx cur_ct
-	config_get cur_ch "$cfg" channel
-	config_get cur_tx "$cfg" txpower
-	config_get cur_ct "$cfg" country
+	local cur_ch cur_chan cur_tx cur_ct
+	config_get cur_ch   "$cfg" channel
+	config_get cur_chan "$cfg" channels
+	config_get cur_tx   "$cfg" txpower
+	config_get cur_ct   "$cfg" country
 
-	local want_ch=""
-	case "$band" in
-		2g) want_ch=1 ;;
-		5g)
-			# 低段 PCIe 射频（可用 36-48）走 36；其余（仅 149-165 可用）走 149
-			case "$path" in
-				*pcie*) want_ch=36 ;;
-				*)      want_ch=149 ;;
-			esac
-			;;
-		*) return 0 ;;
-	esac
+	local want_chan
+	want_chan=$(channels_for "$band" "$path" "$cfg" "$idx")
+	[ -z "$want_chan" ] && return 0
 
-	if [ "$cur_ch" != "$want_ch" ]; then
-		echo "  $cfg: channel $cur_ch -> $want_ch  (band=$band)"
-		uci -q set "wireless.$cfg.channel=$want_ch"
+	# 信道：一律用 auto，并强制白名单（白名单是防止选到 14 / DFS 的唯一保障）
+	if [ "$cur_ch" != "auto" ]; then
+		echo "  $cfg: channel '$cur_ch' -> 'auto'  (band=$band)"
+		uci -q set "wireless.$cfg.channel=auto"
+		changed=1
+	fi
+	if [ "$cur_chan" != "$want_chan" ]; then
+		echo "  $cfg: channels '$cur_chan' -> '$want_chan'"
+		uci -q set "wireless.$cfg.channels=$want_chan"
 		changed=1
 	fi
 	if [ "$cur_tx" != "$WANT_TXPOWER" ]; then
-		echo "  $cfg: txpower $cur_tx -> $WANT_TXPOWER"
+		echo "  $cfg: txpower '$cur_tx' -> '$WANT_TXPOWER'"
 		uci -q set "wireless.$cfg.txpower=$WANT_TXPOWER"
 		changed=1
 	fi
 	if [ -n "$WANT_COUNTRY" ] && [ "$cur_ct" != "$WANT_COUNTRY" ]; then
-		echo "  $cfg: country $cur_ct -> $WANT_COUNTRY"
+		echo "  $cfg: country '$cur_ct' -> '$WANT_COUNTRY'"
 		uci -q set "wireless.$cfg.country=$WANT_COUNTRY"
 		changed=1
 	fi
 }
 
-# 若整机无线配置为空（首次开机的极早期），这里不做生成，交给 mac80211.uc；
-# 我们只负责"纠正已生成的默认值"。
+# 若整机无线配置为空（首次开机的极早期），这里不做生成，交给 mac80211.uc
 RADIOS=$(uci -q show wireless | grep "=wifi-device" | cut -d. -f2 | cut -d= -f1)
 
 if [ -z "$RADIOS" ]; then
-	echo "ax6600-wifi-defaults: 暂无 wifi-device 配置，跳过（由 mac80211.uc 生成后再由本次开机后续生效）"
+	echo "ax6600-wifi-defaults: 暂无 wifi-device 配置，跳过"
 	exit 0
 fi
 
-echo "ax6600-wifi-defaults: 开始纠正无线默认值"
+echo "ax6600-wifi-defaults: 开始设定无线默认值（auto 信道 + 白名单）"
+IDX=0
 for r in $RADIOS; do
+	IDX=$((IDX + 1))
 	config_get band "$r" band
 	config_get path "$r" path
-	set_radio "$r" "$band" "$path"
+	set_radio "$r" "$band" "$path" "$IDX"
 done
 
 if [ "$changed" = "1" ]; then
 	uci -q commit wireless
-	echo "ax6600-wifi-defaults: 已提交，重启 wifi 生效"
-	wifi reload >/dev/null 2>&1 &
+	echo "ax6600-wifi-defaults: 已提交，重启 wifi 生效（ACS 需十余秒）"
+	# ACS 扫描需要时间，放到后台避免拖慢开机
+	( sleep 3; wifi reload >/dev/null 2>&1 ) &
 else
 	echo "ax6600-wifi-defaults: 所有值已正确，无需改动"
 fi

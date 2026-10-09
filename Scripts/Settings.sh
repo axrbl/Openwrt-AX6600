@@ -95,17 +95,13 @@ if [ -n "$WIFI_UC" ] && [ -f "$WIFI_UC" ]; then
 	grep -nE "country \|\||txpower|ssid=|key=" "$WIFI_UC" | sed 's/^/    /'
 
 	# --- 默认信道 ---
-	# 注意：信道默认值【不在】这个文件里，它来自各设备的 DTS（生成 /etc/board.json
-	# 的 default_channel）。本机 phy0 的 default_channel=100 是错的（phy0 禁用
-	# 36-144，只允许 149-165），会让 hostapd 启动失败。这里的 sed 只是尽力而为，
-	# 真正的兜底由 files/etc/uci-defaults/99-ax6600-wifi 完成。
-	if grep -q 'default_channel: 100' "$WIFI_UC" 2>/dev/null; then
-		sed -i 's/default_channel: 100/default_channel: 149/g' "$WIFI_UC"
-		echo "  channel default: 100 -> 149  OK"
-	else
-		echo "  NOTE: 'default_channel: 100' 不在本文件（属正常，信道来自 DTS）；"
-		echo "        信道由 uci-defaults/99-ax6600-wifi 在首次启动时兜底设定"
-	fi
+	# 信道采用 ACS（auto）+ 白名单，由 files/etc/uci-defaults/99-ax6600-wifi
+	# 在首次启动时设定，这里【不】替换 default_channel。
+	# 原因：本机 phy0 的 default_channel 是 100（错的，phy0 禁用 36-144），
+	# 但改成任何固定值都不如"auto + 白名单"——后者能自动避开拥挤，
+	# 而白名单保证不会选到信道 14（2.4G，只能跑 802.11b，AP 会宕机）
+	# 或 DFS 信道（5G 低段 52-64，要 60s CAC 且会被雷达踢下线）。
+	echo "  NOTE: 信道策略 = ACS auto + 白名单，交由 uci-defaults/99-ax6600-wifi 设定"
 else
 	echo "ERROR: mac80211.uc/sh not found - wireless defaults NOT patched!"
 fi

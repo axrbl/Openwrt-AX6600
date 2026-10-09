@@ -17,7 +17,7 @@
 | # | 改动 | 落点 | 说明 |
 |---|---|---|---|
 | 7 | 重写本 README | `README.md` | 记录实测结论、构建机制、踩坑 |
-| 6 | **无线默认值机制（新增）** | `Scripts/Settings.sh`、`files/etc/uci-defaults/99-ax6600-wifi`、`WRT-CORE.yml`、`QCA-ALL.yml` | 上游**完全没有**信道/功率的构建期机制。补上：mac80211.uc 注入 txpower；uci-defaults 兜底纠正信道与功率 |
+| 6 | **无线默认值机制（新增）** | `Scripts/Settings.sh`、`files/etc/uci-defaults/99-ax6600-wifi`、`WRT-CORE.yml`、`QCA-ALL.yml` | 上游**完全没有**信道/功率的构建期机制。补上：mac80211.uc 注入 txpower；uci-defaults 设定 `auto` 信道 + 非 DFS 白名单 |
 | 5 | LAN 默认地址 + 两个新变量 | `QCA-ALL.yml` | `WRT_IP` → `172.16.10.1`；新增 `WRT_COUNTRY`、`WRT_TXPOWER` |
 | 4 | 修正 Release 说明文案 | `WRT-CORE.yml` | 原文还在宣传已删除的 PassWall2 / Docker |
 | 3 | 移除 Docker 全家桶（9 项） | `Config/GENERAL_AX6600_PLUS.txt` | 所有服务都用原生二进制；**保留 `kmod-ikconfig`** |
@@ -88,13 +88,18 @@
 
 ### 5.2 我们的配置（也是固件默认值）
 
-| WiFi | 射频 | 信道 | 带宽 | 功率 |
-|---|---|---|---|---|
-| 2.4G | radio1 | `1` | HE20 | **14 dBm** |
-| 5G-1（4×4） | radio0 | **`149`** | HE80 | **14 dBm** |
-| 5G-2（2×2） | radio2 | **`36`** | HE80 | **14 dBm** |
+三个射频**全部使用 ACS（`auto`）+ 信道白名单**，功率统一 **14 dBm**：
+
+| WiFi | 射频 | 信道 | 白名单（`channels`） | 带宽 | 功率 |
+|---|---|---|---|---|---|
+| 2.4G | radio1 | `auto` | `1 2 3 4 5 6 7 8 9 10 11 12 13` | HE20 | 14 dBm |
+| 5G-1（4×4） | radio0 | `auto` | `149 153 157 161` | HE80 | 14 dBm |
+| 5G-2（2×2） | radio2 | `auto` | `36 40 44 48` | HE80 | 14 dBm |
 
 SSID 三个射频统一 `OWRT`，加密 `psk2+ccmp`。国家码 `CN`。
+
+**白名单不是可选项，是必需的。** 实测（见 §5.7）：不加白名单时 ACS 会选到
+**信道 14**（2.4G）和 **DFS 信道**（5G 低段），两者都会让 AP 直接起不来。
 
 ### 5.3 为什么功率只给 14 dBm
 
@@ -105,7 +110,9 @@ SSID 三个射频统一 `OWRT`，加密 `psk2+ccmp`。国家码 `CN`。
 - 功率过大的实际坏处：抬高自身底噪、增加邻频干扰、客户端"看到强信号但速率跑不动"
 - 需要更大覆盖时再调高即可（`uci set wireless.radioX.txpower=<值>`）
 
-### 5.4 为什么信道不用 `auto`（ACS）
+### 5.4 为什么用 `auto` + 白名单（而不是固定信道，也不是裸 `auto`）
+
+先说 ACS（`auto`）的能力边界，别抱错误期待：
 
 | 机制 | 触发时机 | 会不会自动换信道 |
 |---|---|---|
@@ -113,30 +120,29 @@ SSID 三个射频统一 `OWRT`，加密 `psk2+ccmp`。国家码 `CN`。
 | DFS 雷达检测 | 仅 DFS 信道，仅雷达信号 | ✅ 会撤离换信道（发 CSA，客户端掉线） |
 | 「运行中信道变拥挤」 | 邻居新加 AP | ❌ **没有任何机制响应** |
 
-**关键：ACS 不做运行中持续监测，"别人抢信道"不会触发任何自动调整。** 只有雷达能让它自己跳。
+**ACS 不做运行中持续监测，"别人抢信道"不会触发任何自动调整。** 它只在启动时挑一次最好的。
 
-那为什么不开 `auto`？因为**在这台设备上 `auto` 会选到 DFS 信道**（`phy0` 的 100–144、`phy2` 的 52–64），
-触发 60 秒 CAC（期间 AP 完全不可用），运行中误判雷达还会让 AP 直接停播。
+在这个前提下，「`auto` + 白名单」是最优组合：
 
-而 `149`（radio0）与 `36`（radio2）都是**非 DFS** → 永远不用 CAC、永远不会被雷达踢下线。
-两个射频还分别占 5G 高端与低端，**物理上完全隔开、互不干扰**。
+- **`auto` 的价值**：本机 2.4G 实测有 **13 个邻居 AP** 挤在信道 1/3/6/7/9/10/11，
+  而 ACS 一次就选中了没人用的信道（实测选到 13、11）。固定信道做不到这点。
+- **白名单的必要性**：不加限制时 ACS 会选到**会导致 AP 宕机的信道**（见 §5.7）。
+- **白名单同时封死了 DFS**：radio2 的 52–64 在 CN 下依然带 `Radar detection`，
+  白名单把它排除后，`auto` 物理上不可能落到 DFS，**永远不会触发 60 秒 CAC、也不会被雷达踢下线**。
 
-**想换信道时手动勘测后定死，不要交给 `auto`：**
-
-```bash
-iw dev wlan0 scan | grep -E "SSID|channel" | sort | uniq -c | sort -rn
-```
+> 对比「固定信道」：固定值失去了自适应性，而且邻居情况一变就得手动改。
+> 对比「裸 `auto`」：会宕机或落进 DFS。**只有 `auto` + 白名单两者同时成立才对。**
 
 ### 5.5 为什么国家码保持 `CN`（不改 `US`）
 
 `US` 唯一的实际变化是把 **DFS 信道**解禁（`phy2` 的 52–64、`phy0` 的更多频段）：
 
-- 现有非 DFS 信道已足够：radio0 有 5 个（80MHz 只需 2 个）、radio2 有 4 个
-- `US` 还会**禁用 2.4G 的 12–13 信道**（FCC 只到 11），拥挤时少两个选择
+- 现有非 DFS 信道配合白名单已足够：radio0 有 4 个候选、radio2 有 4 个、2.4G 有 13 个
+- `US` 还会**禁用 2.4G 的 12–13 信道**（FCC 只到 11），2.4G 本就拥挤，少两个选择更糟
 - 设备按 `CN` 出厂认证，改 `US` 理论上有法规问题
 - 日志里本来就有 `ath11k_pci: failed to perform regd update : -22`，动国家码会引入新不确定行为
 
-**不换信道 → 不需要更多信道 → 不改国家码。** 与 §5.4 是同一个原则：可用性优先，不碰雷达。
+**改国家码并不能让 `auto` 变安全——白名单才能。** 而白名单已经做到了，所以没必要改。
 
 ### 5.6 上游 README 的信道建议是错的
 
@@ -152,7 +158,48 @@ hostapd: phy0-ap0: Unable to setup interface.
 ```
 
 **这个错误上游也犯在了源码里**：DTS 给 `phy0` 的 `default_channel` 是 **100**（见 §6.3），
-所以**刷新固件后 5G-1 默认就是不工作的**。我们已在构建期修正。
+所以**刷新固件后 5G-1 默认就是不工作的**。我们已在首次启动时用白名单修正。
+
+### 5.7 ⚠️ 实测：裸 `auto` 会选到让 AP 宕机的信道
+
+这是本次排查最重要的发现，也是白名单存在的直接原因。
+
+**（1）2.4G 不加白名单 → ACS 选中信道 14 → AP 彻底宕机**
+
+```
+hostapd: Disable OFDM/HT/VHT/HE/EHT on channel 14     ← 14 只能跑老式 802.11b
+hostapd: phy1-ap0: ACS-COMPLETED freq=2484 channel=14
+hostapd: phy1-ap0: IEEE 802.11 Failed to prepare rates table.
+hostapd: phy1-ap0: interface state ACS->DISABLED
+hostapd: phy1-ap0: AP-DISABLED
+```
+
+为什么 ACS 会选 14？因为 CN 监管域下信道 14 是「可用」的，而它与 1–13 **完全频段隔离**，
+按"最不拥挤"打分自然排第一。但信道 14 只能在 802.11b 下工作，现代 hostapd 直接放弃。
+**加上 `channels='1 2 3 ... 13'` 后立刻正常**（实测选到 11，`phy1-ap0 UP`）。
+
+> 注意：`iw phy phy1 channels` 里信道 14 **没有 `disabled` 也没有 `no-IR` 标记**，
+> 所以**光看监管域输出无法发现这个坑**，必须靠白名单排除。
+
+**（2）5G 低段不加白名单 → 可能落到 DFS 52–64**
+
+```
+* 5260 MHz [52]
+  Radar detection
+  DFS CAC time: 60000 ms        ← 开机要静默 60 秒，且会被雷达踢下线
+```
+
+ACS 日志显示它**确实会扫描**这些 DFS 信道（`ACS: Survey for freq 5260/5280/5300/5320 ...`），
+白名单把它排除后，实测选中 44（非 DFS），全程无 CAC 无雷达事件。
+
+**（3）白名单生效的正面证据**
+
+```
+phy0-ap0  Channel: 157  HE80  14 dBm  UP    ← 在白名单 149/153/157/161 内
+phy1-ap0  Channel: 11   HE20  14 dBm  UP    ← 在白名单 1-13 内（没选 14）
+phy2-ap0  Channel: 44   HE80  14 dBm  UP    ← 在白名单 36/40/44/48 内（没选 DFS）
+hostapd: phy2-ap0: ACS-COMPLETED freq=5220 channel=44
+```
 
 ## 6. 编译机制
 
