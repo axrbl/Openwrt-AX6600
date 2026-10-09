@@ -1,0 +1,149 @@
+#!/bin/sh
+#
+# AX6600 storage 数据分区预置（首次启动执行一次）
+#
+# 作用：把 eMMC 上那块 226 GiB 的 storage 分区准备好并开机自动挂载。
+#
+# ⚠️ 安全设计（很重要）：
+#   1. 分区已存在（带 PARTLABEL="storage"）→ 绝不重新创建、绝不格式化
+#   2. 分区已存在且已有 btrfs → 绝不 mkfs（不会毁数据）
+#   3. 只有"分区不存在"时才创建，只有"分区存在但没有文件系统"时才 mkfs
+#   4. 任何一步失败都继续往下走，不会把开机流程卡死
+#
+# 背景：上游的 no-last-partition 分区表把 226 GiB 留在 GPT 之外，
+#       扩展 GPT（sgdisk -e）后新建该分区。sysupgrade 会保留分区表，
+#       所以正常情况下重刷后分区仍在，只需重建挂载脚本。
+
+. /lib/functions.sh
+
+PARTLABEL=storage
+MOUNTDIR=/mnt/storage
+FSTYPE=btrfs
+FSLABEL=storage
+DEV=/dev/mmcblk0
+
+log() { echo "ax6600-storage: $*"; }
+
+# ---------- 1) 找现有分区（优先 PARTLABEL，其次扫盘） ----------
+find_part() {
+	# 优先 by-partlabel
+	for p in /dev/disk/by-partlabel/$PARTLABEL; do
+		[ -e "$p" ] && { echo "$p"; return 0; }
+	done
+	# 退而求其次：遍历 mmcblk0 的分区，看 PARTNAME
+	for p in ${DEV}p*; do
+		[ -b "$p" ] || continue
+		# blkid 读 PARTLABEL
+		if blkid "$p" 2>/dev/null | grep -q "PARTLABEL=\"$PARTLABEL\""; then
+			echo "$p"; return 0
+		fi
+	done
+	return 1
+}
+
+PART=$(find_part)
+
+# ---------- 2) 分区不存在就创建 ----------
+if [ -z "$PART" ]; then
+	log "未找到 $PARTLABEL 分区，尝试在 $DEV 上创建"
+	if ! which sgdisk >/dev/null 2>&1; then
+		log "缺少 sgdisk，跳过（需要 sgdisk 包）"
+	else
+		# 扩展 GPT 到磁盘真实末尾（幂等：已扩展过则不改动）
+		sgdisk -e "$DEV" >/dev/null 2>&1
+		# 新建分区，占满剩余可用空间
+		sgdisk -n 0:0:0 -c 0:$PARTLABEL \
+		       -t 0:1B1720DA-A8BB-4B6F-92D2-0A93AB9609CA \
+		       "$DEV" >/dev/null 2>&1
+		sleep 2
+		# 触发重扫
+		[ -w /sys/block/mmcblk0/device/rescan ] && echo 1 > /sys/block/mmcblk0/device/rescan 2>/dev/null
+		sleep 2
+		PART=$(find_part)
+		if [ -z "$PART" ]; then
+			log "创建失败，跳过本次（可稍后手动处理）"
+		else
+			log "已创建分区: $PART"
+		fi
+	fi
+else
+	log "分区已存在: $PART（不重建、不格式化）"
+fi
+
+# ---------- 3) 没有文件系统才格式化（有就绝对不动） ----------
+if [ -n "$PART" ]; then
+	CURFS=$(blkid -s TYPE -o value "$PART" 2>/dev/null)
+	if [ -z "$CURFS" ]; then
+		log "$PART 无文件系统，创建 $FSTYPE（卷标 $FSLABEL）"
+		if which mkfs.btrfs >/dev/null 2>&1; then
+			mkfs.btrfs -L "$FSLABEL" -f "$PART" >/dev/null 2>&1 && log "格式化完成" || log "格式化失败"
+		else
+			log "缺少 mkfs.btrfs，跳过（需要 btrfs-progs 包）"
+		fi
+	else
+		log "$PART 已有文件系统 ($CURFS)，不格式化"
+	fi
+fi
+
+# ---------- 4) 生成开机自动挂载脚本（UUID 优先，最稳） ----------
+if [ ! -x /etc/init.d/storage ] && [ -n "$PART" ]; then
+	FSUUID=$(blkid -s UUID -o value "$PART" 2>/dev/null)
+	log "写入 /etc/init.d/storage（FSUUID=${FSUUID:-无})"
+
+	# 故意用「三次顺序尝试」而不是循环：模板简单，不会出现嵌套转义问题
+	{
+		echo '#!/bin/sh /etc/rc.common'
+		echo '# 自动挂载 eMMC storage 分区到 '"$MOUNTDIR"
+		echo '# 由 uci-defaults 预置生成；优先按 btrfs UUID 挂载（分区号变化也不怕）'
+		echo 'START=99'
+		echo ''
+		echo 'start() {'
+		echo '	mkdir -p '"$MOUNTDIR"
+		echo '	grep -q " '"$MOUNTDIR"' " /proc/mounts && return 0'
+		if [ -n "$FSUUID" ]; then
+			echo '	mount -t '"$FSTYPE"' -U '"$FSUUID"' '"$MOUNTDIR"' 2>/dev/null && return 0'
+		fi
+		echo '	[ -e /dev/disk/by-partlabel/'"$PARTLABEL"' ] && \'
+		echo '		mount -t '"$FSTYPE"' /dev/disk/by-partlabel/'"$PARTLABEL"' '"$MOUNTDIR"' 2>/dev/null && return 0'
+		echo '	[ -b '"$PART"' ] && \'
+		echo '		mount -t '"$FSTYPE"' '"$PART"' '"$MOUNTDIR"' 2>/dev/null && return 0'
+		echo '	logger -t storage "failed to mount '"$MOUNTDIR"'"'
+		echo '}'
+		echo ''
+		echo 'stop() {'
+		echo '	umount '"$MOUNTDIR"' 2>/dev/null || true'
+		echo '}'
+		echo ''
+		echo 'boot() { start; }'
+	} > /etc/init.d/storage
+
+	chmod 755 /etc/init.d/storage
+
+	# 生成后立刻做语法检查，出错要能看见
+	if sh -n /etc/init.d/storage 2>/tmp/_st_err; then
+		log "生成的 init 脚本语法 OK"
+		/etc/init.d/storage enable >/dev/null 2>&1
+		log "已启用开机自挂载: $(ls /etc/rc.d/*storage* 2>/dev/null | tr '\n' ' ')"
+	else
+		log "生成的 init 脚本语法错误: $(cat /tmp/_st_err 2>/dev/null)"
+		log "内容如下，便于排查:"
+		sed 's/^/    /' /etc/init.d/storage
+	fi
+else
+	log "已存在 /etc/init.d/storage 或分区不可用，跳过生成"
+fi
+
+# ---------- 5) 立即挂载一次（本次开机就能用） ----------
+mkdir -p $MOUNTDIR
+if ! grep -q " $MOUNTDIR " /proc/mounts; then
+	if [ -x /etc/init.d/storage ]; then
+		/etc/init.d/storage start >/dev/null 2>&1
+	fi
+fi
+if grep -q " $MOUNTDIR " /proc/mounts; then
+	log "已挂载: $(df -h $MOUNTDIR 2>/dev/null | tail -1)"
+else
+	log "未挂载（可稍后手动处理）"
+fi
+
+exit 0

@@ -49,39 +49,54 @@ config interface 'waneth'
 	list track_ip '119.29.29.29'
 	list track_ip '8.8.8.8'
 
-# 成员权重：wan 权重 20，waneth 权重 10 → 只要 wan 健康就优先走它
-config member 'wan_m1_w20'
+# 主备（failover）配置：
+#   policy 'wan_only' 同时列出两个成员，mwan3 只会选用当前【在线】且
+#   metric 最小的那个 —— 这正是主备语义：
+#     wan(metric 1) 健康   -> 全程走 wan
+#     wan 被判 down        -> 自动落到 waneth(metric 2)
+#   两地网络互不干扰，也不需要负载均衡，所以不用 balanced。
+config member 'wan_m1_w10'
 	option interface 'wan'
 	option metric '1'
-	option weight '20'
+	option weight '10'
 
 config member 'waneth_m2_w10'
 	option interface 'waneth'
 	option metric '2'
 	option weight '10'
 
-# 策略：balanced 使用两个成员，按权重分配；某条 down 时自动只用剩下那条
-config policy 'balanced'
-	list use_member 'wan_m1_w20'
+# 主备策略（默认使用这个）
+config policy 'wan_only'
+	list use_member 'wan_m1_w10'
 	list use_member 'waneth_m2_w10'
 
-config policy 'wan_only'
-	list use_member 'wan_m1_w20'
-
+# 仅备用线路（手动切到网线时用）
 config policy 'waneth_only'
 	list use_member 'waneth_m2_w10'
 
-# 默认规则：全部流量走 balanced 策略（自动择优 + 故障切换）
+# 仅主线路（手动切到手机时用）
+config policy 'primary_only'
+	list use_member 'wan_m1_w10'
+
+# balanced 保留但不用（负载均衡会同时消耗手机流量，本部署不需要）
+config policy 'balanced'
+	list use_member 'wan_m1_w10'
+	list use_member 'waneth_m2_w10'
+
+# 默认规则：主备。wan 在线走 wan，wan 掉线自动走 waneth。
+# wan_only 这个 policy 里同时含主备两个成员，mwan3 会跳过当前 down 的成员、
+# 在健康成员中选 metric 最小的 —— 所以单靠这一条规则就实现了主备，
+# 不需要再加一条指向备用 policy 的规则。
 config rule 'default_rule_v4'
 	option dest_ip '0.0.0.0/0'
 	option family 'ipv4'
-	option use_policy 'balanced'
+	option use_policy 'wan_only'
 	option proto 'all'
 
 config rule 'default_rule_v6'
 	option dest_ip '::/0'
 	option family 'ipv6'
-	option use_policy 'balanced'
+	option use_policy 'wan_only'
 	option proto 'all'
 
 config globals 'globals'
