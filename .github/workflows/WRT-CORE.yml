@@ -50,6 +50,11 @@ on:
         required: false
         type: string
         default: 14
+      #netbird 管理端地址（本 fork 新增；留空则不动 netbird 配置）
+      NB_MGMT_URL:
+        required: false
+        type: string
+        default: ''
       WRT_TEST:
         required: false
         type: string
@@ -70,6 +75,7 @@ env:
   WRT_PROFILE: ${{inputs.WRT_PROFILE}}
   WRT_COUNTRY: ${{inputs.WRT_COUNTRY}}
   WRT_TXPOWER: ${{inputs.WRT_TXPOWER}}
+  NB_MGMT_URL: ${{inputs.NB_MGMT_URL}}
   WRT_PKG_INFO: 无（纯净版不集成外部插件）
   WRT_TEST: ${{inputs.WRT_TEST}}
 
@@ -254,10 +260,10 @@ jobs:
             if [ -d ./files/etc/uci-defaults ]; then
               for F in $(find ./files/etc/uci-defaults -type f 2>/dev/null); do
                 chmod 755 "$F"
-                # 只有 wifi 脚本带占位符；对其它脚本是无副作用的空操作
-                sed -i "s/__TXPOWER__/${WRT_TXPOWER}/g; s/__COUNTRY__/${WRT_COUNTRY}/g; s/__SSID__/${WRT_SSID}/g; s/__WORD__/${WRT_WORD}/g" "$F"
+                # 只有部分脚本带占位符；对没有占位符的脚本是无副作用的空操作
+                sed -i "s/__TXPOWER__/${WRT_TXPOWER}/g; s/__COUNTRY__/${WRT_COUNTRY}/g; s/__SSID__/${WRT_SSID}/g; s/__WORD__/${WRT_WORD}/g; s|__MGMT_URL__|${NB_MGMT_URL:-}|g" "$F"
                 echo "  uci-defaults ready: $F (mode $(stat -c '%a' "$F" 2>/dev/null || echo '?'))"
-                grep -nE '__TXPOWER__|__COUNTRY__|__SSID__|__WORD__' "$F" | sed 's/^/    UNRESOLVED: /' || true
+                grep -nE '__TXPOWER__|__COUNTRY__|__SSID__|__WORD__|__MGMT_URL__' "$F" | sed 's/^/    UNRESOLVED: /' || true
               done
             fi
             if [ -d ./files/etc/init.d ]; then

@@ -1,0 +1,74 @@
+#!/bin/sh
+#
+# 把公司自建 netbird 管理端地址固化到 netbird 服务里（首次启动执行一次）
+#
+# 背景：netbird 的管理端地址【不能】用环境变量设置 —— 实测二进制里 63 个
+#       NB_* 变量中没有 NB_MANAGEMENT_URL，只有 NB_STATE_DIR / NB_CONFIG 等。
+#       管理端地址只能通过：
+#         ① 命令行参数  netbird service run --management-url <url>
+#         ② 写进 profile  netbird up --management-url <url>  →  default.json
+#
+#       本脚本用方法①：给包的 init 脚本打一行补丁。这样即使全新刷机、
+#       profile 是空的，服务一起来就已经指向公司管理端，不必每次手敲。
+#
+# 为什么不用 --service-env：需要先 service install/uninstall，
+# 且会覆盖包自带的 NB_STATE_DIR/NB_DNS_STATE_FILE，风险更大。
+#
+# 注意：netbird 包升级会覆盖 /etc/init.d/netbird，那时需要重新跑本脚本
+#       （脚本是幂等的，重跑即可）。
+
+. /lib/functions.sh
+
+MGMT_URL='__MGMT_URL__'
+INIT=/etc/init.d/netbird
+
+log() { echo "ax6600-netbird: $*"; }
+
+# ---------- 1) 前置检查 ----------
+if [ ! -f "$INIT" ]; then
+	log "$INIT 不存在（netbird 包未装？），跳过"
+	exit 0
+fi
+
+# 只检查变量是否为空。构建时 workflow 已把 __MGMT_URL__ 替换成实际值；
+# 若 NB_MGMT_URL 留空，workflow 会用 "${NB_MGMT_URL:-}" 兜底成空字符串，
+# 这里据此跳过（此时 netbird 用其默认 api.netbird.io）。
+if [ -z "$MGMT_URL" ]; then
+	log "管理端地址为空（NB_MGMT_URL 未设置），跳过，保持 netbird 默认"
+	exit 0
+fi
+
+# ---------- 2) 幂等：已有就不重复加 ----------
+if grep -q -- '--management-url' "$INIT" 2>/dev/null; then
+	if grep -q -- "$MGMT_URL" "$INIT" 2>/dev/null; then
+		log "已包含正确的管理端地址，无需改动"
+	else
+		log "已存在 --management-url 但地址不同，替换为 $MGMT_URL"
+		sed -i "s|--management-url [^ \"]*|--management-url $MGMT_URL|g" "$INIT"
+	fi
+	exit 0
+fi
+
+# ---------- 3) 在 'service run' 之后插入参数 ----------
+if ! grep -q 'procd_append_param command service run' "$INIT" 2>/dev/null; then
+	log "未找到预期的 'service run' 行，init 脚本结构可能已变，跳过（需人工处理）"
+	log "当前内容预览:"
+	sed -n '1,25p' "$INIT" | sed 's/^/    /'
+	exit 0
+fi
+
+sed -i "\|procd_append_param command service run|a\\	procd_append_param command --management-url $MGMT_URL" "$INIT"
+
+# ---------- 4) 改完立刻语法检查，坏了就回滚 ----------
+if sh -n "$INIT" 2>/dev/null; then
+	log "已注入管理端地址: $MGMT_URL"
+	log "语法检查通过"
+	# 重启服务让改动生效（失败也不阻塞开机）
+	( sleep 2; /etc/init.d/netbird restart >/dev/null 2>&1 ) &
+else
+	log "注入后语法错误，回滚"
+	sed -i "\|--management-url $MGMT_URL|d" "$INIT"
+	log "已回滚"
+fi
+
+exit 0

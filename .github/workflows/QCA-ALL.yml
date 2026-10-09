@@ -61,6 +61,9 @@ jobs:
       WRT_COUNTRY: CN
       #默认发射功率 dBm（本 fork 新增；20 平单间，14 dBm≈25mW 足够，避免过大干扰）
       WRT_TXPOWER: 14
+      #netbird 管理端（本 fork 新增；公司自建服务器，固化进 netbird 服务的 init 参数）
+      #留空则不改 netbird 配置，使用其默认 api.netbird.io
+      NB_MGMT_URL: https://nb.jcsmt.com:8443
       #默认密码，仅作提示，修改无用
       WRT_PW: 无
       #源码链接
