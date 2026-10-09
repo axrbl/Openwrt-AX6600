@@ -17,6 +17,7 @@
 | # | 改动 | 落点 | 说明 |
 |---|---|---|---|
 | 7 | 重写本 README | `README.md` | 记录实测结论、构建机制、踩坑 |
+| 6b | **双 WAN 自动故障切换（新增）** | `Config/GENERAL_AX6600_PLUS.txt`、`files/etc/config/mwan3`、`files/etc/uci-defaults/99-ax6600-dualwan`、`WRT-CORE.yml` | mwan3 健康探测 + 手机 USB 共享为主、物理网口为备（见 §9） |
 | 6 | **无线默认值机制（新增）** | `Scripts/Settings.sh`、`files/etc/uci-defaults/99-ax6600-wifi`、`WRT-CORE.yml`、`QCA-ALL.yml` | 上游**完全没有**信道/功率的构建期机制。补上：mac80211.uc 注入 txpower；uci-defaults 设定 `auto` 信道 + 非 DFS 白名单 |
 | 5 | LAN 默认地址 + 两个新变量 | `QCA-ALL.yml` | `WRT_IP` → `172.16.10.1`；新增 `WRT_COUNTRY`、`WRT_TXPOWER` |
 | 4 | 修正 Release 说明文案 | `WRT-CORE.yml` | 原文还在宣传已删除的 PassWall2 / Docker |
@@ -36,7 +37,7 @@
 | eMMC | `mmcblk0` = 483,328,000 扇区 ≈ 230.5 GiB |
 | U-Boot | 社区「不死 U-Boot」`2024.05.10_12:22:07` — **不要重刷** |
 | 分区表 | 双分区 `2048M` rootfs；`mmcblk0p18` = rootfs；overlay 走 `/dev/loop0` 2 GB（f2fs） |
-| 数据分区 | **`mmcblk0p27` / `storage` = 226.8 GiB，已格式化为 btrfs 并开机自挂载到 `/mnt/storage`**（见 §9） |
+| 数据分区 | **`mmcblk0p27` / `storage` = 226.8 GiB，已格式化为 btrfs 并开机自挂载到 `/mnt/storage`**（见 §10） |
 
 ## 3. 我们用到的固件能力
 
@@ -354,7 +355,54 @@ git pushf     # 推我们自己的 fork
 | `*-factory-*.bin` | 经 **u-boot webui** 刷（会清配置） |
 | `*-sysupgrade-*.bin` | 已在 OpenWrt/ImmortalWrt 上，**系统内升级** |
 
-## 9. storage 数据分区（226.8 GiB）
+## 9. 双 WAN 自动故障切换（mwan3）
+
+### 9.1 两条 WAN
+
+| 接口 | 设备 | 角色 | metric | mwan3 权重 |
+|---|---|---|---|---|
+| `wan` | `usb0`（手机 USB 共享 / RNDIS） | 主 | 10 | 20 |
+| `waneth` | `wan`（物理网口） | 备 | 20 | 10 |
+
+两个都在防火墙 `wan` zone 内（`masq=1`、`fullcone=1` 继承）。`wan6` 禁用（手机共享无 IPv6，IPv6 交给 mwan3）。
+
+### 9.2 为什么需要 mwan3 而不是只靠 metric
+
+**纯 metric 方案只能感知"链路断开"**：网线拔了、手机拔了，内核删除默认路由，另一条接管。
+实测已验证这套机制有效：
+
+```
+两条路由并存 → ip route get 223.5.5.5 → via 192.168.11.1 dev usb0   （选 metric 小的）
+删掉 usb0 路由 → ip route get 223.5.5.5 → via 192.168.99.1 dev wan    （自动接管）
+```
+
+**但它无法处理"网线插着、灯亮着、上游没网"** —— 物理链路是 UP 的，内核认为它好，不会切换。
+这是公寓网络最常见的故障形态。
+
+**mwan3 用定时 ping 健康探测补上这一环**：探测 `223.5.5.5` / `119.29.29.29` / `8.8.8.8`，
+丢失率超阈值即把该线路标记为 down 并切换。配置在 `files/etc/config/mwan3`。
+
+### 9.3 为什么要把 `wan=usb0` 烧成开机默认也是安全的
+
+单看"WAN 必须用 usb0"很危险（没插手机就断网）。但**配上 mwan3 后不再危险**：
+两条线路都由 mwan3 纳管，哪条健康走哪条，没插手机而网线通时自动走网线。
+
+`files/etc/uci-defaults/99-ax6600-dualwan` 负责建立接口定义（幂等，已正确则不动）：
+
+- `network.wan.device=usb0` / `proto=dhcp` / `metric=10`
+- `network.waneth`（新建）= `wan` / `dhcp` / `metric=20`
+- 把 `waneth` 加入防火墙 wan zone
+- `network.wan6.disabled=1`
+
+> ⚠️ 注意 `files/etc/config/mwan3` 会**覆盖** mwan3 包自带的默认配置。
+> 如果你以后在 LuCI 里改了 mwan3 设置，下次刷机会被这里覆盖。
+
+### 9.4 依赖
+
+`mwan3` 依赖的 `ip-full`、`kmod-nf-conntrack-netlink`、`nftables` 本机已有；
+`conntrack-tools` 会随本次构建一起编入。**kmod 都在，没有事后装不上的问题。**
+
+## 10. storage 数据分区（226.8 GiB）
 
 ### 背景：上游的 `no-last-partition` 分区表把 226 GB 留在了 GPT 之外
 
@@ -402,7 +450,7 @@ mkfs.btrfs -L storage -f /dev/mmcblk0p27
 - 分区表在 eMMC 上，**sysupgrade 会保留**；init 脚本在 `/etc/`（overlay），**也会保留**
 - 但**刷 `factory.bin` 会清配置** → init 脚本没了，需要刷完重新创建（分区本身还在）
 
-## 10. 刷完的待办
+## 11. 刷完的待办
 
 1. **改 WiFi 密码**（默认 `12345678` 是公开值）：
    ```bash
@@ -415,7 +463,7 @@ mkfs.btrfs -L storage -f /dev/mmcblk0p27
 4. **Samba / 备份 / git mirror**：Forgejo 直接放 **arm64 单文件**即可（不需要 Docker）
 5. **eMMC 体检**：`mmc extcsd read /dev/mmcblk0 | grep -i life`
 
-## 11. 已知坑
+## 12. 已知坑
 
 ### 设备侧
 
@@ -439,7 +487,7 @@ mkfs.btrfs -L storage -f /dev/mmcblk0p27
 - **公司网络会 reset GitHub 的 https git 传输** → **用 SSH**（`git@github.com` 或 `ssh.github.com:443`）。
 - 未认证 GitHub API 限流 **60 次/小时**。
 
-## 12. 文档
+## 13. 文档
 
 | 文件 | 内容 |
 |---|---|
@@ -448,13 +496,13 @@ mkfs.btrfs -L storage -f /dev/mmcblk0p27
 | `Scripts/Settings.sh` | 默认值注入点（LAN IP / 主机名 / SSID / 密码 / 功率） |
 | `files/etc/uci-defaults/99-ax6600-wifi` | 信道 + 功率 + 国家码兜底 |
 
-## 13. 上游
+## 14. 上游
 
 | 仓库 | 关系 |
 |---|---|
 | [ones20250/Openwrt-AX6600](https://github.com/ones20250/Openwrt-AX6600) | 本仓库的 **fork 来源**，即 `origin` |
 | [ones20250/immortalwrt_ipq](https://github.com/ones20250/immortalwrt_ipq) | **CI 编译时拉取的固件源码**（`QCA-ALL.yml` 的 `SOURCE` 矩阵），与 fork 关系无关 |
 
-## 14. 免责声明
+## 15. 免责声明
 
 刷机有风险。本固件仅供自用与学习研究。请确认设备型号匹配，并提前备份数据。

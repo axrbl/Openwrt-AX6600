@@ -1,0 +1,98 @@
+#!/bin/sh
+#
+# AX6600 双 WAN 开机默认配置（首次启动执行一次）
+#
+# 主 WAN：usb0（手机 USB 共享 / RNDIS）
+# 备 WAN：wan（物理网口）
+#
+# 由 mwan3 做健康探测与故障切换（见 /etc/config/mwan3）。
+# 注意：这里【不】写死"必须用 usb0"——两条线路都由 mwan3 纳管，
+# 哪条健康就走哪条，所以没插手机时也不会断网（只要网线通）。
+#
+# 这个脚本只做网络与防火墙的接口定义，mwan3 的配置由
+# files/etc/config/mwan3 直接提供。
+
+. /lib/functions.sh
+
+changed=0
+
+# ---------- 1) 主 WAN：usb0 ----------
+if [ "$(uci -q get network.wan.device)" != "usb0" ]; then
+	echo "  network.wan.device: '$(uci -q get network.wan.device)' -> 'usb0'"
+	uci -q set network.wan.device='usb0'
+	changed=1
+fi
+if [ "$(uci -q get network.wan.proto)" != "dhcp" ]; then
+	echo "  network.wan.proto: -> 'dhcp'"
+	uci -q set network.wan.proto='dhcp'
+	changed=1
+fi
+# metric 交叉保留：即使 mwan3 未运行，metric 也能提供基本的链路级切换
+if [ "$(uci -q get network.wan.metric)" != "10" ]; then
+	uci -q set network.wan.metric='10'
+	changed=1
+fi
+
+# ---------- 2) 备 WAN：物理网口 ----------
+if ! uci -q get network.waneth >/dev/null 2>&1; then
+	echo "  创建 network.waneth -> device 'wan'"
+	uci -q set network.waneth='interface'
+	changed=1
+fi
+if [ "$(uci -q get network.waneth.device)" != "wan" ]; then
+	echo "  network.waneth.device -> 'wan'"
+	uci -q set network.waneth.device='wan'
+	changed=1
+fi
+if [ "$(uci -q get network.waneth.proto)" != "dhcp" ]; then
+	uci -q set network.waneth.proto='dhcp'
+	changed=1
+fi
+if [ "$(uci -q get network.waneth.metric)" != "20" ]; then
+	uci -q set network.waneth.metric='20'
+	changed=1
+fi
+
+# ---------- 3) 防火墙：把 waneth 也放进 wan zone ----------
+ZONES=$(uci -q show firewall | grep "=zone" | cut -d. -f2 | cut -d= -f1)
+WANZONE=""
+for z in $ZONES; do
+	if [ "$(uci -q get firewall.$z.name)" = "wan" ]; then
+		WANZONE="$z"
+		break
+	fi
+done
+
+if [ -n "$WANZONE" ]; then
+	CUR=$(uci -q get firewall.$WANZONE.network)
+	case " $CUR " in
+		*" waneth "*) : ;;
+		*)
+			echo "  firewall.$WANZONE.network += 'waneth'"
+			uci -q add_list firewall.$WANZONE.network='waneth'
+			changed=1
+			;;
+	esac
+else
+	echo "  WARN: 未找到防火墙 wan zone，waneth 未加入（需手工处理）"
+fi
+
+# ---------- 4) wan6 交给 mwan3，禁用内置 dhcpv6 ----------
+# 手机共享不提供 IPv6；留着会让 netifd 对不存在的东西反复重试
+if [ "$(uci -q get network.wan6.disabled)" != "1" ]; then
+	echo "  network.wan6.disabled -> 1（IPv6 由 mwan3 处理）"
+	uci -q set network.wan6.disabled='1'
+	changed=1
+fi
+
+# ---------- 5) 提交 ----------
+if [ "$changed" = "1" ]; then
+	uci -q commit network
+	uci -q commit firewall
+	echo "ax6600-dualwan: 已提交配置，重启网络"
+	( sleep 3; ubus call network reload 2>/dev/null || /etc/init.d/network reload 2>/dev/null ) &
+else
+	echo "ax6600-dualwan: 配置已正确，无需改动"
+fi
+
+exit 0

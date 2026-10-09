@@ -1,0 +1,89 @@
+# mwan3 配置：手机 USB 共享(usb0) 与物理网口(wan) 双 WAN 自动故障切换
+#
+# 由本仓库 files/ 提供，构建时进入镜像的 /etc/config/mwan3。
+# 依赖：network.wan -> usb0、network.waneth -> wan（由 uci-defaults 脚本建立）
+#
+# 优先级：wan(usb0) 为主，waneth(网线) 为备。
+# 与纯 metric 方案的区别：mwan3 做【健康探测】——定时 ping 目标，
+# 失败达到阈值就把该线路标 down 并切换。这能覆盖 metric 方案无法处理的
+# "链路 UP 但上游没网"场景。
+
+config interface 'wan'
+	option enabled '1'
+	option family 'ipv4'
+	option proto 'dhcp'
+	option track_method 'ping'
+	option reliability '1'
+	option count '1'
+	option size '56'
+	option max_ttl '60'
+	option check_quality '0'
+	option timeout '4'
+	option interval '10'
+	option failure_latency '1000'
+	option recovery_latency '500'
+	option failure_loss '40'
+	option recovery_loss '5'
+	# 探测目标：阿里 DNS + 腾讯 DNS + Google DNS（国内可达性优先）
+	list track_ip '223.5.5.5'
+	list track_ip '119.29.29.29'
+	list track_ip '8.8.8.8'
+
+config interface 'waneth'
+	option enabled '1'
+	option family 'ipv4'
+	option proto 'dhcp'
+	option track_method 'ping'
+	option reliability '1'
+	option count '1'
+	option size '56'
+	option max_ttl '60'
+	option check_quality '0'
+	option timeout '4'
+	option interval '10'
+	option failure_latency '1000'
+	option recovery_latency '500'
+	option failure_loss '40'
+	option recovery_loss '5'
+	list track_ip '223.5.5.5'
+	list track_ip '119.29.29.29'
+	list track_ip '8.8.8.8'
+
+# 成员权重：wan 权重 20，waneth 权重 10 → 只要 wan 健康就优先走它
+config member 'wan_m1_w20'
+	option interface 'wan'
+	option metric '1'
+	option weight '20'
+
+config member 'waneth_m2_w10'
+	option interface 'waneth'
+	option metric '2'
+	option weight '10'
+
+# 策略：balanced 使用两个成员，按权重分配；某条 down 时自动只用剩下那条
+config policy 'balanced'
+	list use_member 'wan_m1_w20'
+	list use_member 'waneth_m2_w10'
+
+config policy 'wan_only'
+	list use_member 'wan_m1_w20'
+
+config policy 'waneth_only'
+	list use_member 'waneth_m2_w10'
+
+# 默认规则：全部流量走 balanced 策略（自动择优 + 故障切换）
+config rule 'default_rule_v4'
+	option dest_ip '0.0.0.0/0'
+	option family 'ipv4'
+	option use_policy 'balanced'
+	option proto 'all'
+
+config rule 'default_rule_v6'
+	option dest_ip '::/0'
+	option family 'ipv6'
+	option use_policy 'balanced'
+	option proto 'all'
+
+config globals 'globals'
+	option mmx_mask '0x3F00'
+	option rtmon_interval '5'

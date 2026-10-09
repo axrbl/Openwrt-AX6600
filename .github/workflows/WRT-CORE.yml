@@ -249,13 +249,25 @@ jobs:
           if [ -d "$GITHUB_WORKSPACE/files" ]; then
             echo "Applying $GITHUB_WORKSPACE/files -> ./files"
             cp -a "$GITHUB_WORKSPACE/files/." ./files/
-            # 注入本次构建的无线参数（脚本里是 __TXPOWER__ / __COUNTRY__ 占位）
-            for F in $(find ./files/etc/uci-defaults -type f -name '*ax6600*' 2>/dev/null); do
-              sed -i "s/__TXPOWER__/${WRT_TXPOWER}/g; s/__COUNTRY__/${WRT_COUNTRY}/g" "$F"
-              chmod 755 "$F"
-              echo "  injected into $F: txpower=${WRT_TXPOWER} country=${WRT_COUNTRY}"
-              grep -nE 'WANT_TXPOWER|WANT_COUNTRY' "$F" | sed 's/^/    /'
-            done
+
+            # 所有 uci-defaults 脚本都必须可执行，否则首次开机不会运行
+            if [ -d ./files/etc/uci-defaults ]; then
+              for F in $(find ./files/etc/uci-defaults -type f 2>/dev/null); do
+                chmod 755 "$F"
+                # 只有 wifi 脚本带占位符；对其它脚本是无副作用的空操作
+                sed -i "s/__TXPOWER__/${WRT_TXPOWER}/g; s/__COUNTRY__/${WRT_COUNTRY}/g; s/__SSID__/${WRT_SSID}/g; s/__WORD__/${WRT_WORD}/g" "$F"
+                echo "  uci-defaults ready: $F (mode $(stat -c '%a' "$F" 2>/dev/null || echo '?'))"
+                grep -nE '__TXPOWER__|__COUNTRY__|__SSID__|__WORD__' "$F" | sed 's/^/    UNRESOLVED: /' || true
+              done
+            fi
+            if [ -d ./files/etc/init.d ]; then
+              for F in $(find ./files/etc/init.d -type f 2>/dev/null); do
+                chmod 755 "$F"
+                echo "  init.d ready: $F"
+              done
+            fi
+
+            echo "  --- files/ 内容 ---"
             find ./files -type f | sed 's/^/  file: /'
           else
             echo "no files/ dir in repo, skipped"
