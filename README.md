@@ -450,20 +450,145 @@ mkfs.btrfs -L storage -f /dev/mmcblk0p27
 - 分区表在 eMMC 上，**sysupgrade 会保留**；init 脚本在 `/etc/`（overlay），**也会保留**
 - 但**刷 `factory.bin` 会清配置** → init 脚本没了，需要刷完重新创建（分区本身还在）
 
-## 11. 刷完的待办
+## 11. netbird 与公司内网访问（含两个必须修的坑）
+
+### 11.1 分流目标
+
+| 目标 | 走哪条路 | 机制 |
+|---|---|---|
+| `10.0.0.0/8` 内网 | **netbird 隧道 `wt0`** | peer 通告的网段（实际是 `10.1.1.0/24`、`10.1.20.0/24`、`10.2.1.0/24`） |
+| `git` / `gerrit` / `registry`.jcsmt.com | **隧道** | 它们解析到 `10.1.20.x`，是私有 IP |
+| `sso.jcsmt.com` | **直连外面** | 解析到 Cloudflare 公网 IP（`104.21.x` / `172.67.x`） |
+| `nb.jcsmt.com` | **直连外面** | 解析到 `112.65.87.25`（公网） |
+
+**关键认知：路由由 IP 决定，不是由域名决定。** 所以不需要按域名配路由——
+`*.jcsmt.com` 里凡是解析到 `10.x` 的自动走隧道，解析到公网 IP 的自动走外面。
+
+`sso` / `nb` 必须能直连，否则会形成死锁：
+**要登录才能连隧道，而解析登录域名又要先连上隧道**（这个坑 2026-09-27 踩过一次）。
+
+### 11.2 坑 1：dnsmasq 上游被 netbird 接管 → 所有域名都解析不了
+
+netbird 会把 `/etc/resolv.conf` 和 `/tmp/resolv.conf.d/resolv.conf.auto`
+都改写成 `nameserver 127.0.0.153`（它自己的解析器），
+而它 **`Nameservers: 0/0 Available`** —— 它没配任何上游。
+dnsmasq 的 `resolvfile` 指向后者，于是**连 `www.baidu.com` 都解析失败**。
+
+**修复**（`files/etc/uci-defaults/99-ax6600-netbird-dns`）：
+
+```bash
+uci set dhcp.@dnsmasq[0].noresolv='1'          # 不看被污染的 resolvfile
+uci add_list dhcp.@dnsmasq[0].server='223.5.5.5'
+uci add_list dhcp.@dnsmasq[0].server='119.29.29.29'
+uci add_list dhcp.@dnsmasq[0].server='180.76.76.76'
+```
+
+### 11.3 坑 2：rebind protection 丢弃内网域名（返回私有 IP 的应答）
+
+公司内网域名在**公网 DNS 上就能解析**到私有地址：
+
+```
+git.jcsmt.com    -> lb1.rke2.sh1.jcsmt.com -> 10.1.20.11
+gerrit.jcsmt.com -> lb1.rke2.sh1.jcsmt.com -> 10.1.20.11
+registry.jcsmt.com -> 10.1.20.53
+```
+
+OpenWrt 的 dnsmasq 默认 `rebind_protection=1`，把"公网域名返回私有 IP"当作
+DNS 重绑定攻击丢弃 → **内网域名全部解析失败**。
+
+**按域白名单试过，全部无效**：
+
+| 写法 | 结果 |
+|---|---|
+| `rebind_domain='jcsmt.com'` | ❌ |
+| `rebind_domain='*.jcsmt.com'` | ❌ |
+| `rebind_domain='jcsmt.com/lan'` | ❌ |
+| `rebind_domain='sh1.jcsmt.com'` | ❌ |
+
+原因：该检查针对**应答里的名字**，而查询名是 CNAME 的别名（`gerrit.jcsmt.com`），
+匹配不上真实记录名。**只能全局关闭**：
+
+```bash
+uci set dhcp.@dnsmasq[0].rebind_protection='0'
+```
+
+代价：失去"恶意 DNS 把公网域名指向内网 IP"的防护。本机在 NAT 后面，可接受。
+
+### 11.4 坑 3：LAN 客户端拿不到隧道内的内网路由（设备侧，不在固件里）
+
+netbird 用**策略路由**选路：
+
+```
+ip rule 110: not from all fwmark 0x1bd00 lookup netbird
+```
+
+它只给**本机自己发出**的包打 `0x1bd00` 标记。LAN 客户端**转发**的包没有标记，
+但这条 rule 对所有源地址生效——所以理论上是通的（主表查不到 `10.x` 时落到 rule 110
+查 netbird 表）。**实测确实通**。
+
+但有个隐患：**netbird 重启会清掉主表里 netbird 创建的路由**（实测复现）。
+虽然靠 rule 110 兜底仍能通，但为稳妥起见用 cron 周期镜像路由：
+
+```bash
+# /usr/bin/netbird-route-sync   +   /etc/crontabs/root:
+* * * * * /usr/bin/netbird-route-sync
+```
+
+脚本把 netbird 表里的 `dev wt0` 路由镜像进主表，**幂等**、netbird 表为空时清理。
+
+**试过但不可行的方案**：
+
+| 方案 | 为什么不行 |
+|---|---|
+| `uci network.@route`（interface=wt0） | 依赖 wt0 在 network reload 时已存在，**时机对不上**，实测无效 |
+| `/etc/hotplug.d/iface/` 脚本 | **netbird 创建的 wt0 不触发 hotplug 事件**（探针日志为空），死代码 |
+
+**端到端验证**：重启 netbird → 主表路由清零 → **cron 在 50 秒内自动补回**，
+内网连通性恢复。
+
+### 11.5 与 netbird 服务相关的两个改动
+
+**① 管理端地址固化**（`files/etc/uci-defaults/99-ax6600-netbird`）
+
+netbird 的管理端地址**不能用环境变量设置**——实测二进制里 63 个 `NB_*` 变量中
+没有管理端 URL 这一项。只能：
+
+- 命令行参数 `netbird service run --management-url <url>`（**本仓库用这个**）
+- 或写进 profile `netbird up --management-url <url>`
+
+脚本给包的 init 脚本打一行补丁，**幂等**、改完自检语法、坏了自动回滚。
+netbird 包升级会覆盖 init 脚本，那时重跑该脚本即可。
+
+**② 登录用设备码流程，可用二维码**
+
+netbird 0.78 的 SSO 是**设备码流程**：
+
+```
+https://<管理端>/oauth2/device?user_code=XXXX-XXXX
+```
+
+路由器上没有图形浏览器，`netbird up` 会打印这个 URL。
+**注意：`netbird up --qr` 在路由器上【不会】渲染二维码**（实测输出与不带 `--qr`
+完全一致）——因为环境非 tty、`TERM` 未设置、无 `tput`。
+
+所以二维码在**客户端侧**生成：`netbird-relogin.cmd` 抓到 URL 后在本机生成二维码页面，
+手机扫码即可完成认证。
+
+## 12. 刷完的待办
 
 1. **改 WiFi 密码**（默认 `12345678` 是公开值）：
    ```bash
    for i in 0 1 2; do uci set wireless.default_radio$i.key='<新密码>'; done
    uci commit wireless && wifi reload
    ```
-2. **配 netbird**（无 LuCI）：`netbird up --setup-key <后台生成的 setup key>`
-3. **配 USB RNDIS WAN**：手机开「USB 共享网络」→ 出现 `usb0` →
-   把 `network.wan` 的 device 指过去 + 配 firewall zone
+2. **配 netbird 登录**（无 LuCI）：跑 `netbird-relogin.cmd`，手机扫二维码完成 SSO。
+   管理端地址已由固件固化，不需要手敲。
+3. **加 LAN → 内网 的路由同步**（`99-ax6600-netbird-dns` 只管 DNS，路由同步是设备侧）：
+   见 §11.4，需要把 `/usr/bin/netbird-route-sync` 与 cron 任务补上。
 4. **Samba / 备份 / git mirror**：Forgejo 直接放 **arm64 单文件**即可（不需要 Docker）
 5. **eMMC 体检**：`mmc extcsd read /dev/mmcblk0 | grep -i life`
 
-## 12. 已知坑
+## 13. 已知坑
 
 ### 设备侧
 
@@ -487,7 +612,7 @@ mkfs.btrfs -L storage -f /dev/mmcblk0p27
 - **公司网络会 reset GitHub 的 https git 传输** → **用 SSH**（`git@github.com` 或 `ssh.github.com:443`）。
 - 未认证 GitHub API 限流 **60 次/小时**。
 
-## 13. 文档
+## 14. 文档
 
 | 文件 | 内容 |
 |---|---|
@@ -496,13 +621,13 @@ mkfs.btrfs -L storage -f /dev/mmcblk0p27
 | `Scripts/Settings.sh` | 默认值注入点（LAN IP / 主机名 / SSID / 密码 / 功率） |
 | `files/etc/uci-defaults/99-ax6600-wifi` | 信道 + 功率 + 国家码兜底 |
 
-## 14. 上游
+## 15. 上游
 
 | 仓库 | 关系 |
 |---|---|
 | [ones20250/Openwrt-AX6600](https://github.com/ones20250/Openwrt-AX6600) | 本仓库的 **fork 来源**，即 `origin` |
 | [ones20250/immortalwrt_ipq](https://github.com/ones20250/immortalwrt_ipq) | **CI 编译时拉取的固件源码**（`QCA-ALL.yml` 的 `SOURCE` 矩阵），与 fork 关系无关 |
 
-## 15. 免责声明
+## 16. 免责声明
 
 刷机有风险。本固件仅供自用与学习研究。请确认设备型号匹配，并提前备份数据。

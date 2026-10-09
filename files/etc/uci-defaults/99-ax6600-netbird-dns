@@ -1,0 +1,72 @@
+#!/bin/sh
+#
+# netbird + DNS 分流预置（首次启动执行一次）
+#
+# 解决的问题（2026-10-09 实测，两个都会让公司内网域名解析失败）：
+#
+#   问题 1：netbird 会接管 resolv.conf，把 dnsmasq 的上游变成它的解析器
+#     netbird 把 /etc/resolv.conf 和 /tmp/resolv.conf.d/resolv.conf.auto
+#     都写成 "nameserver 127.0.0.153"，而它自己 Nameservers: 0/0 Available
+#     （没有配置任何上游）。dnsmasq 的 resolvfile 指向后者，
+#     结果【所有】域名解析都失败，连 www.baidu.com 都不行。
+#
+#   问题 2：rebind protection 丢弃返回私有 IP 的应答
+#     公司内网域名在公网 DNS 上就能解析到私有地址，例如
+#       git.jcsmt.com / gerrit.jcsmt.com -> lb1.rke2.sh1.jcsmt.com -> 10.1.20.11
+#     OpenWrt 的 dnsmasq 默认 rebind_protection=1，会把这些应答当成
+#     DNS 重绑定攻击丢掉，导致内网域名解析失败。
+#
+#     尝试过用 rebind_domain 做按域白名单，但【无效】：
+#       rebind_domain='jcsmt.com' / '*.jcsmt.com' / 'jcsmt.com/lan' / 'sh1.jcsmt.com'
+#     全都不能让 jcsmt.com 通过。原因是该检查针对应答里的名字，
+#     而查询名是 CNAME 的别名（gerrit.jcsmt.com），匹配不上。
+#     所以这里只能全局关闭——代价可接受：本机在 NAT 后面，
+#     而内网服务不可用的代价大得多。
+#
+# 分流原理（不需要按域名配路由）：
+#   路由由【IP】决定，不是由域名决定。
+#     10.x 的地址   -> 在 netbird 路由表里 -> 走隧道 wt0
+#     公网地址      -> 走默认路由 usb0/wan
+#   因此 sso.jcsmt.com -> 172.67.216.225（Cloudflare，公网）自动走外面，
+#        nb.jcsmt.com  -> 112.65.87.25（也是公网）自动走外面，
+#   这两个是登录必需的域名，必须能直连，否则会形成
+#   "要登录才能连隧道、而解析登录域名又要先连上隧道" 的死锁。
+
+. /lib/functions.sh
+
+log() { echo "ax6600-netbird-dns: $*"; }
+
+# ---------- 1) dnsmasq 上游：忽略被 netbird 接管的 resolvfile，用公网 DNS ----------
+uci -q set dhcp.@dnsmasq[0].noresolv='1'
+uci -q delete dhcp.@dnsmasq[0].server 2>/dev/null
+uci -q add_list dhcp.@dnsmasq[0].server='223.5.5.5'
+uci -q add_list dhcp.@dnsmasq[0].server='119.29.29.29'
+uci -q add_list dhcp.@dnsmasq[0].server='180.76.76.76'
+log "dnsmasq 上游已固定为公网 DNS（noresolv=1）"
+
+# ---------- 2) 关闭 rebind protection，让内网域名能返回私有 IP ----------
+uci -q set dhcp.@dnsmasq[0].rebind_protection='0'
+uci -q delete dhcp.@dnsmasq[0].rebind_domain 2>/dev/null
+log "rebind_protection 已关闭（否则公司内网域名会被丢弃）"
+
+uci -q commit dhcp
+
+# ---------- 3) 生效 ----------
+/etc/init.d/dnsmasq restart >/dev/null 2>&1
+log "dnsmasq 已重启"
+
+# ---------- 4) 立即验证，把结果写进日志便于排查 ----------
+sleep 3
+OK=0
+FAIL=0
+for h in sso.jcsmt.com nb.jcsmt.com github.com; do
+	if nslookup "$h" 127.0.0.1 >/dev/null 2>&1; then
+		OK=$((OK+1))
+	else
+		FAIL=$((FAIL+1))
+		log "  ⚠️ 解析失败: $h（netbird 可能还没连上，属正常）"
+	fi
+done
+log "公网域名解析自检: 成功 $OK / 失败 $FAIL"
+
+exit 0
