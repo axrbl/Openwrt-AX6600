@@ -16,11 +16,13 @@
 
 | # | 改动 | 落点 | 说明 |
 |---|---|---|---|
-| 5 | 重写本 README | `README.md` | 修正 WiFi 信道建议、插件清单、默认地址；记录远端结构与踩坑 |
-| 4 | 移除 Docker 全家桶（9 项） | `Config/GENERAL_AX6600_PLUS.txt` | 所有服务都用原生二进制；**保留 `kmod-ikconfig`**（`/proc/config.gz`） |
-| 3 | 关 PassWall2（11 项）+ geo 数据；关打印服务；加 aria2 / btrfs | 同上 | 只用 OpenClash |
-| 2 | `PROFILE: PURE → PLUS`；加 `push` 触发；追加定制包组 | `.github/workflows/QCA-ALL.yml`、`GENERAL_AX6600_PLUS.txt` | 让 push 改 `Config/**` 即自动编译 |
-| 1 | `kmod-usb-net-{rndis,cdc-ncm,cdc-ether,huawei-cdc-ncm}` → `=y` | `Config/GENERAL_AX6600.txt` | 手机 USB 共享上网 |
+| 7 | 重写本 README | `README.md` | 记录实测结论、构建机制、踩坑 |
+| 6 | **无线默认值机制（新增）** | `Scripts/Settings.sh`、`files/etc/uci-defaults/99-ax6600-wifi`、`WRT-CORE.yml`、`QCA-ALL.yml` | 上游**完全没有**信道/功率的构建期机制。补上：mac80211.uc 注入 txpower；uci-defaults 兜底纠正信道与功率 |
+| 5 | LAN 默认地址 + 两个新变量 | `QCA-ALL.yml` | `WRT_IP` → `172.16.10.1`；新增 `WRT_COUNTRY`、`WRT_TXPOWER` |
+| 4 | 修正 Release 说明文案 | `WRT-CORE.yml` | 原文还在宣传已删除的 PassWall2 / Docker |
+| 3 | 移除 Docker 全家桶（9 项） | `Config/GENERAL_AX6600_PLUS.txt` | 所有服务都用原生二进制；**保留 `kmod-ikconfig`** |
+| 2 | 关 PassWall2（11 项）+ geo 数据；关打印服务；加 aria2 / btrfs | 同上 | 只用 OpenClash |
+| 1 | `PROFILE: PURE → PLUS`；加 `push` 触发；追加定制包组<br>`kmod-usb-net-{rndis,cdc-ncm,cdc-ether,huawei-cdc-ncm}` → `=y` | `.github/workflows/QCA-ALL.yml`、`Config/*` | 手机 USB 共享上网 |
 
 **定制一律追加在 `Config/GENERAL_AX6600_PLUS.txt` 末尾** —— 因为 `.config` 是顺序拼接、后写覆盖先写（见 §6）。
 
@@ -30,167 +32,233 @@
 |---|---|
 | 设备 | 京东云 AX6600「雅典娜」 |
 | board / 平台 | `jdcloud,re-cs-02`，`qualcommax/ipq60xx` |
-| SoC / 内存 | Qualcomm IPQ6010 / 1 GB |
-| eMMC | `mmcblk0` ≈ 230 GiB（256 GB 级） |
+| SoC / 内存 | Qualcomm IPQ6010 / 1 GB（实测可用 587 MB） |
+| eMMC | `mmcblk0` = 483,328,000 扇区 ≈ 230.5 GiB |
 | U-Boot | 社区「不死 U-Boot」`2024.05.10_12:22:07` — **不要重刷** |
-| 分区表 | 双分区 `2048M` rootfs（no-last-partition）；`mmcblk0p18` = rootfs；overlay 走 `/dev/loop0` 2 GB |
-| ⚠️ storage 分区 | **尚未创建**（no-last-partition 丢掉了最后那个大分区），需用 `sgdisk` 新建 |
+| 分区表 | 双分区 `2048M` rootfs；`mmcblk0p18` = rootfs；overlay 走 `/dev/loop0` 2 GB（f2fs） |
+| 数据分区 | **`mmcblk0p27` / `storage` = 226.8 GiB，已格式化为 btrfs 并开机自挂载到 `/mnt/storage`**（见 §9） |
 
 ## 3. 我们用到的固件能力
 
 设备用途决定了包里该有什么：
 
-1. **公寓路由器** — LAN 与家里保持一致 `172.16.0.1/24`
+1. **公寓路由器** — LAN `172.16.10.1/24`
 2. **WAN 用手机 USB 共享上网** — 依赖 USB RNDIS/NCM 系列内核模块
-3. **备份服务器 + 私有 git mirror** — 用上 eMMC 那 ~226 GB 空间
+3. **备份服务器 + 私有 git mirror** — 用上 226.8 GiB 的 storage 分区
 
-## 4. 相对上游的改动（我们做的）
+## 4. 相对上游的改动（包层面）
 
-### 3.1 新增
+### 4.1 新增
 
 | 类别 | 包 |
 |---|---|
 | mesh VPN | `netbird`（与公司那套一致；无 LuCI，CLI 配） |
-| eMMC 体检 | `mmc-utils`（寿命 / EOL） |
+| eMMC 体检 | `mmc-utils`（**命令是 `mmc`，在 `/sbin/mmc`**，不是 `mmc-utils`） |
 | 磁盘管理与健康 | `luci-app-diskman`、`smartmontools`、`hdparm`、`luci-app-hd-idle` |
 | 备份 / mirror | `rsync`、`restic`、`zstd`、`git` |
 | 文件共享与浏览 | `luci-app-cifs-mount`、`luci-app-filemanager` |
-| 运维 | `luci-app-vnstat2`（流量统计）、`luci-app-commands`（LuCI 跑脚本） |
+| 运维 | `luci-app-vnstat2`、`luci-app-commands` |
 | 下载 | `aria2`、`luci-app-aria2` |
 | 数据分区快照 | `kmod-fs-btrfs`、`btrfs-progs` |
 | USB 手机共享 | `kmod-usb-net-{rndis,cdc-ncm,cdc-ether,huawei-cdc-ncm}` → `=y` |
 | 排查用 | `kmod-ikconfig`（保留 `/proc/config.gz`） |
 
-### 3.2 删除
+### 4.2 删除
 
 | 类别 | 包 | 原因 |
 |---|---|---|
-| Docker 全家桶 | `docker`、`dockerd`、`docker-compose`、`luci-app-dockerman`、`luci-lib-docker`、`cgroupfs-mount`、`tini`、`kmod-nf-ipvs`、`kmod-veth` | 所有服务都用原生二进制跑，Docker 是纯负担 |
+| Docker 全家桶 | `docker`、`dockerd`、`docker-compose`、`luci-app-dockerman`、`luci-lib-docker`、`cgroupfs-mount`、`tini`、`kmod-nf-ipvs`、`kmod-veth` | 所有服务都用原生二进制跑 |
 | PassWall2 生态 | 11 项 | 只用 OpenClash |
 | 打印服务 | `kmod-usb-printer`、`p910nd`、`luci-app-p910nd` | 不需要 |
 | geo 数据 | `v2ray-geoip`、`v2ray-geosite`、`v2ray-geoview` | 已核实 OpenClash 不依赖 |
 
-> ⚠️ **上游 Release 说明里那句 "预装 OpenClash、PassWall2、Docker/Dockerman…" 是过期文案**，
-> 由 `WRT-CORE.yml` 的 `WRT_PROFILE_DESC` 生成，还没同步我们的删减。以本文件为准。
+> 本机固件实测：**26/26 定制包全部到位，14 项应删的确实都不在**（用 `.manifest` 与 `apk info` 双重确认）。
 
-## 5. ⚠️ WiFi 信道：不要照上游设
+## 5. ⚠️ WiFi 配置（本设备最容易踩的坑）
 
-**这是本设备最容易踩的坑。** ath11k 在本机上的监管域很反直觉，实测（以 `iw phy <phy> channels` 为准）：
+### 5.1 实测监管域（`iw phy <phy> channels`）
 
-| 射频 | 归属 | 实测可用 | ⚠️ 禁用 |
-|---|---|---|---|
-| `phy0` | AHB / radio0（5G-1，4×4） | `149–169`、`100–144`(DFS) | **36–48 全禁用** |
-| `phy2` | PCIe / radio2（5G-2，2×2） | `36–48`（+52–64 DFS） | **100 以上全禁用** |
-| radio1 | 2.4G | `11` / `HE20` | — |
+`country=CN` 下，本机两个 5G 射频的可用信道**完全互补且互不重叠**：
 
-**正确配置：**
+| 射频 | 归属 | 可用非 DFS | 可用 DFS | 最大功率 | 带宽能力 |
+|---|---|---|---|---|---|
+| `phy0` | AHB / radio0（5G-1，**4×4**） | **149 / 153 / 157 / 161 / 165** | **无**（36–144 全部 disabled） | 36 dBm | VHT80 |
+| `phy1` | AHB / radio1（2.4G） | 1–13 | — | 27 dBm | HT40 |
+| `phy2` | PCIe / radio2（5G-2，2×2） | **36 / 40 / 44 / 48** | 52–64（Radar detection，CAC 60000ms，24 dBm） | 30 dBm | VHT160 |
 
-| WiFi | 信道 | 带宽 |
-|---|---|---|
-| 2.4G | `11` | 20 MHz |
-| 5G-1（radio0，4×4） | **`149`** | 80 MHz |
-| 5G-2（radio2，2×2） | **`36`** | 80 MHz |
+### 5.2 我们的配置（也是固件默认值）
 
-通用：地区 `CN`、加密 `WPA2-PSK`（CCMP）。
+| WiFi | 射频 | 信道 | 带宽 | 功率 |
+|---|---|---|---|---|
+| 2.4G | radio1 | `1` | HE20 | **14 dBm** |
+| 5G-1（4×4） | radio0 | **`149`** | HE80 | **14 dBm** |
+| 5G-2（2×2） | radio2 | **`36`** | HE80 | **14 dBm** |
 
-> 上游 README 建议 5G-1 用信道 `44`、5G-2 用 `149`。**在这台设备上会导致 AP 起不来**
-> （hostapd 报 `not allowed for AP mode`）。上游那张表是通用建议，不适用于本机的 ath11k 监管域。
+SSID 三个射频统一 `OWRT`，加密 `psk2+ccmp`。国家码 `CN`。
 
-### 为什么不把信道设成 `auto`（结论：就用固定 149 / 36）
+### 5.3 为什么功率只给 14 dBm
 
-`auto` 就是 OpenWrt 的 **ACS**（Automatic Channel Selection）。它能"自动避让冲突"这个说法**只对一半**：
+用途是 **20 平单间、一个房间内覆盖**，不是穿墙覆盖整栋楼。
+
+- 14 dBm ≈ 25 mW，对一间房有充足余量
+- 上游从未设置 `txpower`，**驱动默认值是 24–27 dBm（250–500 mW）**，对一间房严重过量
+- 功率过大的实际坏处：抬高自身底噪、增加邻频干扰、客户端"看到强信号但速率跑不动"
+- 需要更大覆盖时再调高即可（`uci set wireless.radioX.txpower=<值>`）
+
+### 5.4 为什么信道不用 `auto`（ACS）
 
 | 机制 | 触发时机 | 会不会自动换信道 |
 |---|---|---|
-| ACS | **仅启动/重启 wifi 时** | 选**一次**，之后一直钉在那个信道上 |
-| DFS 雷达检测 | **仅限 DFS 信道**（100–144），且**只对雷达信号** | ✅ 会立刻撤离并换信道（发 CSA，客户端掉线重连） |
-| 「运行中信道变拥挤了」 | 邻居新加了个 AP | ❌ **没有任何机制会响应** |
+| ACS（`auto`） | **仅启动/重启 wifi** | 选**一次**，之后钉住不动 |
+| DFS 雷达检测 | 仅 DFS 信道，仅雷达信号 | ✅ 会撤离换信道（发 CSA，客户端掉线） |
+| 「运行中信道变拥挤」 | 邻居新加 AP | ❌ **没有任何机制响应** |
 
-关键限制，别抱期待：
+**关键：ACS 不做运行中持续监测，"别人抢信道"不会触发任何自动调整。** 只有雷达能让它自己跳。
 
-- **ACS 不做运行中持续监测。**它避得开开机时已有的冲突，避不开运行中新增的冲突。
-- **"别人和我抢同一个信道"不会触发任何自动调整。**hostapd 没有"持续频谱感知 + 择优切换"这个功能；
-  只有**雷达**能让它自己跳信道。
-- 想真的运行中自动换信道，只能自己写脚本定时 `iw scan` 再判优切换——但**换信道会让所有客户端掉线重连**，
-  对一台 7×24 的路由器 + 备份服务器来说得不偿失。**本仓库不这么做。**
+那为什么不开 `auto`？因为**在这台设备上 `auto` 会选到 DFS 信道**（`phy0` 的 100–144、`phy2` 的 52–64），
+触发 60 秒 CAC（期间 AP 完全不可用），运行中误判雷达还会让 AP 直接停播。
 
-那为什么不开 `auto`？因为**在这台设备的监管域下，`auto` 会把射频选到 DFS 信道上**：
+而 `149`（radio0）与 `36`（radio2）都是**非 DFS** → 永远不用 CAC、永远不会被雷达踢下线。
+两个射频还分别占 5G 高端与低端，**物理上完全隔开、互不干扰**。
 
-| 射频 | `auto` 可能选到 | 风险 |
-|---|---|---|
-| `phy0`（radio0，5G-1） | `149–169` 或 **`100–144`(DFS)** | ⚠️ 选到 DFS 要做 **60 秒 CAC**（静默监听雷达），期间 AP 完全不可用；<br>运行中误判雷达则 **AP 直接停播**，5G 短暂断流 |
-| `phy2`（radio2，5G-2） | `36–48` 或 **`52–64`(DFS)** | ⚠️ 同上 |
-
-**`149` 与 `36` 都是非 DFS 信道 → 永远不用 CAC、永远不会被雷达踢下线。**
-对这台要长期在线的设备，**可用性 > 那点理论抗干扰收益**。另外 `auto` 每次重启结果可能不同，
-那些只认 BSSID 的智能家居设备会更难受。
-
-**想换信道时：手动勘测后定死，不要交给 `auto`。**
+**想换信道时手动勘测后定死，不要交给 `auto`：**
 
 ```bash
-# 在路由器上跑，看哪个信道最空（会短暂影响自身 AP）
 iw dev wlan0 scan | grep -E "SSID|channel" | sort | uniq -c | sort -rn
 ```
 
-**如果哪天真想用"自动但零 DFS 风险"**：把 ACS 的信道范围限制在非 DFS 段，
-即 `/etc/config/wireless` 里给对应 radio 加 `option channels '149 153 157 161 165'`（radio0）
-或 `option channels '36 40 44 48'`（radio2），再设 `option channel 'auto'`。
-但如上所述，非 DFS 段本身只有 4–5 个信道，挑不出多少花来，**仍推荐固定 149 / 36**。
+### 5.5 为什么国家码保持 `CN`（不改 `US`）
 
-> 附：`160MHz` 不建议开。`phy0` 若开 160MHz 需要 `149–177`，而 `phy2` 的 160MHz 会横跨
-> `36–64`（含 DFS 52–64）→ 又把雷达风险引回来。用 80MHz 即可。
+`US` 唯一的实际变化是把 **DFS 信道**解禁（`phy2` 的 52–64、`phy0` 的更多频段）：
+
+- 现有非 DFS 信道已足够：radio0 有 5 个（80MHz 只需 2 个）、radio2 有 4 个
+- `US` 还会**禁用 2.4G 的 12–13 信道**（FCC 只到 11），拥挤时少两个选择
+- 设备按 `CN` 出厂认证，改 `US` 理论上有法规问题
+- 日志里本来就有 `ath11k_pci: failed to perform regd update : -22`，动国家码会引入新不确定行为
+
+**不换信道 → 不需要更多信道 → 不改国家码。** 与 §5.4 是同一个原则：可用性优先，不碰雷达。
+
+### 5.6 上游 README 的信道建议是错的
+
+上游建议 5G-1 用 `44`、5G-2 用 `149`。**在本机 `phy0` 的 36–48 全部禁用**，
+照它设会让 AP 直接启动失败：
+
+```
+hostapd: phy0-ap0: IEEE 802.11 Configured channel (100) or frequency (5500) not found
+hostapd: phy0-ap0: Hardware does not support configured channel
+hostapd: Frequency 5500 (primary) not allowed for AP mode, flags: 0x109 RADAR
+hostapd: phy0-ap0: interface state COUNTRY_UPDATE->DISABLED
+hostapd: phy0-ap0: Unable to setup interface.
+```
+
+**这个错误上游也犯在了源码里**：DTS 给 `phy0` 的 `default_channel` 是 **100**（见 §6.3），
+所以**刷新固件后 5G-1 默认就是不工作的**。我们已在构建期修正。
 
 ## 6. 编译机制
+
+### 6.1 配置拼接
 
 - `.config` = **按顺序拼接**：
   `Config/IPQ60XX-WIFI-YES.txt` + `Config/GENERAL_AX6600.txt` + `Config/GENERAL_AX6600_<PROFILE>.txt`
   → **后写覆盖先写**（Kconfig 最后一次赋值生效）。**我们的定制一律追加在 `GENERAL_AX6600_PLUS.txt` 末尾。**
 - **profile 只能是 `PURE` 或 `PLUS`**：`WRT-CORE.yml` 里有 `case` 判断，其它值 `exit 1`；
-  且 `Scripts/Packages.sh` 与 `WRT-CORE.yml` 两处都用 `if [[ "$WRT_PROFILE" == "PLUS" ]]` 门控
-  OpenClash / PassWall2 / partexp / viking 的源码 clone 和 `passwall_packages` feed。
+  且两处都用 `if [[ "$WRT_PROFILE" == "PLUS" ]]` 门控 OpenClash / partexp / viking 的 clone 和 `passwall_packages` feed。
   → **只要用 OpenClash 就必须叫 `PLUS`，别改名。**
 - 编译完会 `rm -rf bin/targets/**/packages`，**Release 里只有固件、没有独立 kmod**。
   → **kmod 必须随固件集成**（ABI hash 会变，刷完事后装不了）。
-- 产物命名：`<源码owner>-<分支>-<profile小写>-<设备>-<时间>.<ext>`
-- **构建缓存**：cache key 含源码 commit，**fork 无法复用上游作者的缓存**。
-  实测首次冷编译约 **2 小时 12 分**（其中 `Compile Firmware` 约 2 小时）；有缓存后明显更快。
+- **构建缓存**：cache key 含源码 commit。实测首次冷编译约 **2 小时 12 分**；命中缓存会明显更快。
 
-### 触发编译
+### 6.2 默认值的三个注入点（重要）
+
+`Scripts/Settings.sh` 在 `./wrt/` 下、**编译前**运行，是设置默认值的唯一入口：
+
+| 文件 | 改什么 | 变量 |
+|---|---|---|
+| `package/base-files/files/bin/config_generate` | LAN 默认 IP、主机名 | `WRT_IP`、`WRT_NAME` |
+| `package/network/config/wifi-scripts/files/lib/wifi/mac80211.uc` | SSID、密码、**发射功率** | `WRT_SSID`、`WRT_WORD`、`WRT_TXPOWER` |
+| `<设备>.dts`（生成 `/etc/board.json`） | **各射频 default_channel** | 见下 |
+
+`mac80211.uc` 是**首次开机生成 `/etc/config/wireless` 的 ucode 生成器**，关键三行：
+
+```
+set ${s}.channel='${channel}'      ← channel 来自 board.json 的 default_channel
+set ${s}.txpower='14'              ← 这一行是【我们插入的】，上游没有
+set ${si}.ssid='OWRT' / key='...'  ← 硬编码字面量，Settings.sh 用 sed 改
+```
+
+### 6.3 ⚠️ 信道默认值来自 DTS，不在 uc 里
+
+`/etc/board.json` 里各射频的 `default_channel` 是**构建时从设备树 DTS 生成**的，实测：
+
+```
+phy0: default_channel = 100   ← 错的！phy0 禁用 36-144，只能是 149-165
+phy1: default_channel = 1
+phy2: default_channel = 36
+```
+
+所以**改 `mac80211.uc` 改不动信道**。上游 DTS 路径与命名不稳定（我们没能在上游仓库里
+定位到该设备的 DTS），因此**不靠 DTS 补丁**，改用下面的兜底机制。
+
+### 6.4 兜底机制：`files/etc/uci-defaults/99-ax6600-wifi`
+
+`WRT-CORE.yml` 会把仓库的 `files/` 拷进固件源码树（OpenWrt 会把源码根的 `files/`
+叠加到 rootfs，于是 `files/etc/uci-defaults/xx` → 镜像里的 `/etc/uci-defaults/xx`，
+**首次开机执行一次**）。
+
+这个脚本**按频段而不是按 radio 名字**纠正，所以不依赖 DTS、不依赖 radio 编号：
+
+| 频段判据 | 目标信道 |
+|---|---|
+| `band=2g` | `1` |
+| `band=5g` 且 path 含 `pcie`（低段射频） | `36` |
+| `band=5g` 其它（仅 149–165 可用） | `149` |
+
+同时强制 `txpower` 与 `country`。构建时把脚本里的 `__TXPOWER__` / `__COUNTRY__`
+占位符替换成实际值。
+
+**已在真机验证**（BusyBox ash）：
+
+```
+场景1 出厂错误值 (radio0=100, 无 txpower)
+      → "radio0: channel 100 -> 149" / "txpower -> 14"   ✅ 纠正成功
+场景2 再跑一遍（幂等性）
+      → "所有值已正确，无需改动"                          ✅ 无副作用
+场景3 恢复现场
+      → radio0=149 / 14dBm 正常，`sh -n` 语法通过
+```
+
+### 6.5 触发编译
 
 | 方式 | 说明 |
 |---|---|
-| `push` 到 `main` 且改动 `Config/**` | **自动触发**（实测生效） |
+| `push` 到 `main` 且改动 `Config/**` | **自动触发** |
 | Actions → `QCA-ALL` → Run workflow | 手动全量 |
-| Actions → `WRT-TEST`，`TEST=true` | **只生成最终 `.config`，不编译**。<br>用来验证包名是否被 `make defconfig` **静默丢弃** |
+| Actions → `WRT-TEST`，`TEST=true` | **只生成最终 `.config`，不编译**，用来验证包名是否被 `make defconfig` 静默丢弃 |
 
 > 💡 **`CONFIG_PACKAGE_xxx=y` 只是意图，不是保证。**
 > 如果该包在 feeds 里不存在，`make defconfig` 会静默丢掉它——编译照样成功、固件照样出，但里面没这个东西。
-> **唯一真相是 Release 里的 `.manifest`**，或者用 `TEST=true` 生成的最终 `Config-*.txt` 反查。
+> **唯一真相是 Release 里的 `.manifest`。**
 
-### 默认值（在 `QCA-ALL.yml` 里）
+### 6.6 当前默认值（`QCA-ALL.yml`）
 
-| 变量 | 当前值 | 说明 |
-|---|---|---|
-| `WRT_NAME` | `OWRT` | 主机名 |
-| `WRT_SSID` / `WRT_WORD` | `OWRT` / `12345678` | WiFi |
-| `WRT_IP` | `192.168.10.1` | **管理地址**（不是 192.168.1.1；也不是我们想要的 172.16.0.1） |
-| `WRT_THEME` | `bootstrap` | 主题 |
+| 变量 | 值 |
+|---|---|
+| `WRT_NAME` | `OWRT` |
+| `WRT_SSID` / `WRT_WORD` | `OWRT` / `12345678`（**刷完自己改**） |
+| `WRT_IP` | **`172.16.10.1`** |
+| `WRT_COUNTRY` / `WRT_TXPOWER` | `CN` / `14` |
+| `WRT_THEME` | `bootstrap` |
 
-> ⚠️ **刷 `factory.bin` 会清除配置**（20240510 版 u-boot 起，刷固件即清配置数据）。
-> 想让刷完直接就是 `172.16.0.1` / `Password01!`，**先改 `WRT_IP` / `WRT_WORD` 再重编**。
-> 走系统内 `sysupgrade` 则会保留现有配置。
+> ⚠️ **刷 `factory.bin` 会清除配置**（20240510 版 u-boot 起，刷固件即清配置数据），
+> 所以刷完是上面的默认值。走系统内 `sysupgrade` 则保留现有配置。
 
-## 7. 仓库与远端（重要）
-
-本仓库同时扮演两个角色，用**两个远端**区分：
+## 7. 仓库与远端（命名反直觉，务必记住）
 
 | 远端 | 指向 | 角色 |
 |---|---|---|
 | `origin` | `git@github.com:ones20250/Openwrt-AX6600.git` | **上游原始出处**，只用来跟进更新 |
 | `upstream` | `git@github.com:axrbl/Openwrt-AX6600.git` | **我们自己的 fork**，我们推送到这里，CI 也在这里跑 |
 
-> 命名确实容易混：**`origin` = 原始作者**，**`upstream` = 我们自己的**。
-> 这是刻意按"要保持同步的那一方叫 origin"来定的。记住：
 > **`origin` 是只读的源头，`upstream` 是我们的家。**
 
 分支策略：**只有 `main` 一条分支，定制直接做在 `main` 上。**
@@ -198,141 +266,148 @@ iw dev wlan0 scan | grep -E "SSID|channel" | sort | uniq -c | sort -rn
 ### 跟进上游更新
 
 ```powershell
-$git = "C:\Users\raxia\Tools\PortableGit\cmd\git.exe"
+$git  = "C:\Users\raxia\Tools\PortableGit\cmd\git.exe"
 $repo = "C:\Users\raxia\devops\Openwrt-AX6600"
 
-# 1) 取上游最新
-& $git -C $repo fetch origin
-
-# 2) 看上游带来了什么
-& $git -C $repo log --oneline HEAD..origin/main
-
-# 3) 合并进我们的 main（因为我们在 main 上定制，这里可能产生冲突）
-& $git -C $repo merge origin/main
-
-# 4) 推回我们自己的 fork（注意是 upstream，不是 origin）
-& $git -C $repo push upstream main
+& $git -C $repo syncf                 # = fetch origin 并列出上游新提交
+& $git -C $repo merge origin/main     # 合进我们的 main（可能冲突）
+& $git -C $repo pushf                 # = push upstream main，触发 CI
 ```
 
-> ⚠️ 因为定制和上游更新都在 `main` 上，第 3 步**可能出现冲突**，
-> 典型冲突点是 `Config/GENERAL_AX6600_PLUS.txt` 和 `.github/workflows/`。
-> 若上游改动碰到了我们定制的那些行，需要手工合。
->
-> 想避免冲突的话，正解是"上游纯净镜像 + 定制单独分支"，
-> 但当前选择是单分支，接受偶发冲突。
+> ⚠️ 因为定制和上游更新都在 `main` 上，第 2 步**可能出现冲突**，典型冲突点是
+> `Config/GENERAL_AX6600_PLUS.txt`、`Scripts/Settings.sh` 和 `.github/workflows/`。
 
 ### 推送目标别搞错
 
-`main` 的 tracking 指向 `origin/main`（为了 `fetch`/`log` 方便）。而 Git 的 `push` 默认跟随 tracking 远端，
-所以**裸 `git push` 会试图推向上游**——会失败（我们对 `ones20250` 没有写权限，是明确报错，不会静默推错地方）。
-
-⚠️ 注意：**`--set-upstream` 不要用来"修"这个**，那会把 tracking 改成 `upstream/main`，
-反而让 `git fetch` / `git log HEAD..origin/main` 这些跟进上游的常用操作变得别扭。
-
-为此 `setup-remotes.ps1` 装了别名，推送还是四个字母：
+`main` 的 tracking 指向 `origin/main`（为了 `fetch`/`log` 方便），而 Git 的 `push` 默认跟随 tracking 远端，
+所以**裸 `git push` 会试图推向上游**——会失败（对 `ones20250` 没有写权限，是明确报错，不会静默推错地方）。
 
 ```powershell
-# 看上游有没有新提交，并列出差异
-git syncf
-
-# 把上游更新合进我们的 main（可能有冲突）
-git merge origin/main
-
-# 推我们自己的 fork（等价于 git push upstream main），触发 CI
-git pushf
-```
-
-完整写法（不用别名时）：
-
-```powershell
-# 拉取同步（无需参数，因为 tracking 指向 origin/main）
-& $git -C $repo pull
-
-# 推送必须显式指定 upstream
-& $git -C $repo push upstream main
+git syncf     # 看上游有没有新东西
+git pushf     # 推我们自己的 fork
 ```
 
 ## 8. 刷机
 
-📖 完整流程见 [`Docs/刷机救砖教程.md`](Docs/刷机救砖教程.md)（开 SSH / 备份分区 / 刷 U-Boot / 9008 救砖）。
+📖 完整流程见 [`Docs/刷机救砖教程.md`](Docs/刷机救砖教程.md)。
 
 ### 关键约束
 
-- **本 u-boot 支持 kernel 为 6 MB 的 OP `factory.bin`**（如大雕 QWRT 那种），
-  以及官方原厂固件 `JDCOS-JDC02`。
+- **本 u-boot 支持 kernel 为 6 MB 的 OP `factory.bin`**，以及官方原厂固件 `JDCOS-JDC02`。
 - 官方 ImmortalWrt 的 `sysupgrade.bin`(tar) 和 `initramfs-uImage.itb` **不能用**。
-- **我们的 `squashfs-factory-*.bin` 就是 u-boot 能吃的格式**，可以直接刷。
-  （它约 80 MB，别和"kernel 6 MB"混淆：6 MB 指 kernel 分区，整包尺寸可以更大。）
-- u-boot webui 入口：`/` = 固件（字段名 `firmware`）；`/img.html` = GPT/IMG（字段名 **`img`**）；
+- **我们的 `squashfs-factory-*.bin` 就是 u-boot 能吃的格式**（约 78.5 MiB，别和"kernel 6 MB"混淆：
+  6 MB 指 kernel 分区，整包尺寸可以更大）。
+- u-boot webui：`/` = 固件（字段名 `firmware`）；`/img.html` = GPT/IMG（字段名 **`img`**）；
   `/art.html`、`/cdt.html`、`/uboot.html`。**写入成功 = 绿灯亮 3 秒。**
 - 进 failsafe：**按住 reset 上电** → 红灯闪 5 次 → 变蓝 → webui 在 `192.168.1.1`。
-- 若进不去 u-boot webui：把网卡速率手动改成 **10M 全双工**再试（网卡与 u-boot 驱动兼容性问题），刷好改回自动协商。
-
-### 两个文件怎么选
+- 若进不去 u-boot webui：把网卡速率手动改成 **10M 全双工**再试。
 
 | 文件 | 用途 |
 |---|---|
 | `*-factory-*.bin` | 经 **u-boot webui** 刷（会清配置） |
-| `*-sysupgrade-*.bin` | 已在 OpenWrt/ImmortalWrt 上，**系统内升级**（保留配置） |
+| `*-sysupgrade-*.bin` | 已在 OpenWrt/ImmortalWrt 上，**系统内升级** |
 
-### 刷机前
+## 9. storage 数据分区（226.8 GiB）
 
-```powershell
-# 校验下载完整性（Windows）
-certutil -hashfile <固件文件名>.bin SHA256
-# 与 Release 里的 sha256sums.txt 对应行比对
+### 背景：上游的 `no-last-partition` 分区表把 226 GB 留在了 GPT 之外
+
+实测发现磁盘 230.5 GiB，但 GPT 的 `last_usable` 只有 4.14 GiB：
+
+```
+mmcblk0 总容量          230.5 GiB
+GPT last-usable           4.14 GiB
+现有分区最大结束           3.69 GiB
+表内剩余空闲              460 MiB
+被漏掉的                 226.3 GiB
 ```
 
-## 9. 刷完的待办
+内核启动日志也报了不一致（主表有效但备份表过期）：
 
-1. **建 storage 分区**：
+```
+GPT:Primary header alternate_lba != Alt. header my_lba
+GPT:8683519 != 483327999
+GPT:last_usable_lbas don't match.  GPT:8683486 != 483327991
+GPT:partition_entry_array_crc32 values don't match
+```
+
+**动手前先做了只读排查**（确认那 226 GB 没有活数据）：逐点采样 + `cmp` 与 `/dev/zero`
+比对 + 检查 ext4/btrfs/f2fs 超级块位置 + 解析磁盘末尾的备份 GPT。结论：低段（4–64 GiB）
+有旧残存、高段（100 GiB 以上）全零、**无任何有效文件系统**，可安全回收。
+
+### 实际执行
+
+```bash
+sgdisk -b /root/gpt-before-storage.bin /dev/mmcblk0     # 先备份
+sgdisk -e /dev/mmcblk0                                  # 扩展 GPT 到磁盘真实末尾
+sgdisk -n 0:0:0 -c 0:storage -t 0:1B1720DA-A8BB-4B6F-92D2-0A93AB9609CA /dev/mmcblk0
+mkfs.btrfs -L storage -f /dev/mmcblk0p27
+```
+
+结果：**`mmcblk0p27` = 226.8 GiB，btrfs，挂载在 `/mnt/storage`，200 MB 写入测试通过。**
+
+开机自挂载由 `/etc/init.d/storage`（`S99storage`）负责，**不依赖 fstab**
+（OpenWrt 的 fstab 由 `block-mount` 在启动早期读取，那时分区可能还没就绪，用 init 脚本更可靠）。
+
+### ⚠️ 重要：这部分**不在固件里**
+
+`storage` 分区与挂载脚本是**设备侧状态**：
+
+- 分区表在 eMMC 上，**sysupgrade 会保留**；init 脚本在 `/etc/`（overlay），**也会保留**
+- 但**刷 `factory.bin` 会清配置** → init 脚本没了，需要刷完重新创建（分区本身还在）
+
+## 10. 刷完的待办
+
+1. **改 WiFi 密码**（默认 `12345678` 是公开值）：
    ```bash
-   sgdisk -e -n 0:0:0 -c 0:storage -t 0:1B1720DA-A8BB-4B6F-92D2-0A93AB9609CA -p /dev/mmcblk0
+   for i in 0 1 2; do uci set wireless.default_radio$i.key='<新密码>'; done
+   uci commit wireless && wifi reload
    ```
-   然后 `mkfs.btrfs`（建议建 `@data` 子卷，方便快照）
-2. **配 netbird**（无 LuCI）：`netbird up --setup-key <setup key>`；
-   init 脚本 `/etc/init.d/netbird`，配置在 `/root/.config/netbird/`
+2. **配 netbird**（无 LuCI）：`netbird up --setup-key <后台生成的 setup key>`
 3. **配 USB RNDIS WAN**：手机开「USB 共享网络」→ 出现 `usb0` →
    把 `network.wan` 的 device 指过去 + 配 firewall zone
-4. **Samba / 备份 / git mirror**：Forgejo 直接放 **arm64 单文件**即可
-   （无 OpenWrt 包、不需要 Docker、不需要重编固件）
+4. **Samba / 备份 / git mirror**：Forgejo 直接放 **arm64 单文件**即可（不需要 Docker）
+5. **eMMC 体检**：`mmc extcsd read /dev/mmcblk0 | grep -i life`
 
-## 10. 已知坑
+## 11. 已知坑
 
 ### 设备侧
 
 - **绝对不要用 `apk add --force-broken-world`** — 会删掉 220 个包（内核 + kmod）把系统搞挂。
-- `/overlay`、`/opt/docker` 之类占位符**不能直接 `rm`**（会连数据一起删），要用 `mknod <path> c 0 0` 重建。
-- `no-last-partition` 分区表刷完后，**最后那个大分区要自己建**。
-- 这版固件**默认管理地址是 `192.168.10.1`**（不是 `192.168.1.1`）。
+- **本机包管理器是 `apk`，不是 `opkg`**（新版 ImmortalWrt SNAPSHOT）。`opkg` 命令不存在。
+- `/overlay`、`/opt/docker` 之类占位符**不能直接 `rm`**，要用 `mknod <path> c 0 0` 重建。
+- `mmc-utils` 的**命令名是 `mmc`**（`/sbin/mmc`），不是 `mmc-utils`。
+- BusyBox 精简，**没有 `od`、`blockdev`**；`hexdump` 可用。
+- 写 shell 脚本时注意：`sh -c '... $(cat /path/$VAR/size) ...'` 这种嵌套在某些环境下
+  `$VAR` 可能不展开，**用硬编码路径最稳**。
 
 ### 编译侧
 
-- **kmod 必须随固件集成**，Release 不含独立 kmod 包。
-- `make defconfig` 会静默丢弃 feeds 里不存在的包 → **必须用 `.manifest` 或 `TEST=true` 验证**。
+- **kmod 必须随固件集成**，Release 不含独立 kmod。
+- `make defconfig` 会静默丢弃 feeds 里不存在的包 → **必须用 `.manifest` 验证**。
 - `WRT_PROFILE` 不能改名，只能 `PURE` / `PLUS`。
+- 信道默认值**不在 `mac80211.uc`**，来自 DTS 生成的 `board.json`（见 §6.3）。
 
 ### 网络 / 传输
 
-- **公司网络会 reset GitHub 的 https git 传输**（`Recv failure: Connection was reset`）→ **用 SSH**：
-  `git@github.com` 或 `ssh.github.com:443`。本仓库远端已全部用 SSH。
+- **公司网络会 reset GitHub 的 https git 传输** → **用 SSH**（`git@github.com` 或 `ssh.github.com:443`）。
 - 未认证 GitHub API 限流 **60 次/小时**。
 
-## 11. 文档
+## 12. 文档
 
 | 文件 | 内容 |
 |---|---|
 | [`Docs/刷机救砖教程.md`](Docs/刷机救砖教程.md) | 开 SSH / 备份分区 / 刷 U-Boot / 9008 救砖 |
-| `HANDOFF.md` | 上一轮排查的详细交接（**本地未跟踪文件，不要 commit**） |
-| `Config/GENERAL_AX6600_PLUS.txt` | 我们全部定制的落点 |
+| `Config/GENERAL_AX6600_PLUS.txt` | 我们全部定制包的落点 |
+| `Scripts/Settings.sh` | 默认值注入点（LAN IP / 主机名 / SSID / 密码 / 功率） |
+| `files/etc/uci-defaults/99-ax6600-wifi` | 信道 + 功率 + 国家码兜底 |
 
-## 12. 上游
+## 13. 上游
 
 | 仓库 | 关系 |
 |---|---|
 | [ones20250/Openwrt-AX6600](https://github.com/ones20250/Openwrt-AX6600) | 本仓库的 **fork 来源**，即 `origin` |
 | [ones20250/immortalwrt_ipq](https://github.com/ones20250/immortalwrt_ipq) | **CI 编译时拉取的固件源码**（`QCA-ALL.yml` 的 `SOURCE` 矩阵），与 fork 关系无关 |
 
-## 13. 免责声明
+## 14. 免责声明
 
 刷机有风险。本固件仅供自用与学习研究。请确认设备型号匹配，并提前备份数据。

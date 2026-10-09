@@ -41,6 +41,15 @@ on:
         required: false
         type: string
         default: PURE
+      #无线默认值（本 fork 新增，供 Scripts/Settings.sh 打补丁用）
+      WRT_COUNTRY:
+        required: false
+        type: string
+        default: CN
+      WRT_TXPOWER:
+        required: false
+        type: string
+        default: 14
       WRT_TEST:
         required: false
         type: string
@@ -59,6 +68,8 @@ env:
   WRT_SOURCE: ${{inputs.WRT_SOURCE}}
   WRT_PACKAGE: ${{inputs.WRT_PACKAGE}}
   WRT_PROFILE: ${{inputs.WRT_PROFILE}}
+  WRT_COUNTRY: ${{inputs.WRT_COUNTRY}}
+  WRT_TXPOWER: ${{inputs.WRT_TXPOWER}}
   WRT_PKG_INFO: 无（纯净版不集成外部插件）
   WRT_TEST: ${{inputs.WRT_TEST}}
 
@@ -104,7 +115,7 @@ jobs:
           esac
           echo "WRT_PROFILE=$WRT_PROFILE_UPPER" >> $GITHUB_ENV
           if [[ "$WRT_PROFILE_UPPER" == "PLUS" ]]; then
-            echo "WRT_PROFILE_DESC=Plus 版，预装 OpenClash、PassWall2、Docker/Dockerman、AdGuard Home、DDNS、ttyd、UPnP 及分区扩容、网络唤醒等实用插件，刷完即用；启用 AdGuard Home 与代理插件前请先阅读 README 的「PLUS 版使用提示」" >> $GITHUB_ENV
+            echo "WRT_PROFILE_DESC=Plus 版（本 fork 定制）：OpenClash、AdGuard Home、DDNS、ttyd、UPnP、Samba4、WireGuard、netbird、aria2、restic/rsync/git 备份与私有 git mirror、btrfs 数据分区快照、磁盘管理与 SMART（diskman/hdparm/smartmontools/hd-idle）、vnstat2 流量统计、commands 网页脚本；已移除 PassWall2 与 Docker 全家桶（所有服务均以原生二进制运行）；详见 README" >> $GITHUB_ENV
           else
             echo "WRT_PROFILE_DESC=纯净版，轻量稳定，仅含基础网络与常用管理插件，扩展插件按需自行安装" >> $GITHUB_ENV
           fi
@@ -231,6 +242,24 @@ jobs:
           fi
 
           $GITHUB_WORKSPACE/Scripts/Settings.sh
+
+          # 把仓库里的 files/ 覆盖进固件源码树（OpenWrt 会把源码根的 files/
+          # 叠加到 rootfs，于是 files/etc/uci-defaults/xx 会变成镜像里的
+          # /etc/uci-defaults/xx，首次开机执行一次）
+          if [ -d "$GITHUB_WORKSPACE/files" ]; then
+            echo "Applying $GITHUB_WORKSPACE/files -> ./files"
+            cp -a "$GITHUB_WORKSPACE/files/." ./files/
+            # 注入本次构建的无线参数（脚本里是 __TXPOWER__ / __COUNTRY__ 占位）
+            for F in $(find ./files/etc/uci-defaults -type f -name '*ax6600*' 2>/dev/null); do
+              sed -i "s/__TXPOWER__/${WRT_TXPOWER}/g; s/__COUNTRY__/${WRT_COUNTRY}/g" "$F"
+              chmod 755 "$F"
+              echo "  injected into $F: txpower=${WRT_TXPOWER} country=${WRT_COUNTRY}"
+              grep -nE 'WANT_TXPOWER|WANT_COUNTRY' "$F" | sed 's/^/    /'
+            done
+            find ./files -type f | sed 's/^/  file: /'
+          else
+            echo "no files/ dir in repo, skipped"
+          fi
 
           make defconfig -j$(nproc) && make clean -j$(nproc)
 

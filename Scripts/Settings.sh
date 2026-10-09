@@ -33,15 +33,81 @@ if [ -f "$WIFI_SH" ]; then
 	sed -i "s/BASE_SSID='.*'/BASE_SSID='$WRT_SSID'/g" "$WIFI_SH"
 	#修改WIFI密码
 	sed -i "s/BASE_WORD='.*'/BASE_WORD='$WRT_WORD'/g" "$WIFI_SH"
-elif [ -f "$WIFI_UC" ]; then
-	#修改WIFI名称
-	sed -i "s/ssid='.*'/ssid='$WRT_SSID'/g" $WIFI_UC
-	#修改WIFI密码
-	sed -i "s/key='.*'/key='$WRT_WORD'/g" $WIFI_UC
-	#修改WIFI地区
-	#sed -i "s/country='.*'/country='US'/g" $WIFI_UC
-	#修改WIFI加密
-	#sed -i "s/encryption='.*'/encryption='psk2+ccmp'/g" $WIFI_UC
+fi
+
+# =========================================================
+# 无线默认值补丁（本 fork 新增）
+# 上游把 5G-1 的默认信道设成 100，但本机 phy0 实测禁用 36-144（仅 149-165
+# 可用），导致 AP 直接启动失败：hostapd 报 "Hardware does not support
+# configured channel" / "not allowed for AP mode"，5G-1 射频完全不工作。
+# 同时上游从未设置发射功率，驱动默认值高达 24-27 dBm，对 20 平单间严重过量。
+# =========================================================
+WIFI_UC=""
+for CAND in \
+	"./package/network/config/wifi-scripts/files/lib/wifi/mac80211.uc" \
+	"./package/network/config/wifi-scripts/files/lib/wifi/mac80211.sh" \
+	"./package/kernel/mac80211/files/lib/wifi/mac80211.sh" ; do
+	[ -f "$CAND" ] && WIFI_UC="$CAND" && break
+done
+if [ -z "$WIFI_UC" ]; then
+	WIFI_UC=$(find ./package -type f -name 'mac80211.uc' 2>/dev/null | head -n 1)
+fi
+
+if [ -n "$WIFI_UC" ] && [ -f "$WIFI_UC" ]; then
+	echo "Wireless defaults patch target: $WIFI_UC"
+
+	# --- 国家码 ---
+	if grep -q "country || 'CN'" "$WIFI_UC" 2>/dev/null; then
+		sed -i "s/country || 'CN'/country || '$WRT_COUNTRY'/g" "$WIFI_UC"
+		echo "  country default -> $WRT_COUNTRY  OK"
+	else
+		echo "  WARN: \"country || 'CN'\" 未找到，国家码未打补丁"
+	fi
+
+	# --- 发射功率 ---
+	# 上游【完全没有】txpower 这一项，驱动会用自身默认值（实测 24-27 dBm，
+	# 对 20 平单间严重过量）。在 channel 行之后插入。
+	if grep -q 'txpower' "$WIFI_UC" 2>/dev/null; then
+		echo "  txpower 已存在，跳过"
+	elif grep -q 'set ${s}.channel' "$WIFI_UC" 2>/dev/null; then
+		sed -i "/set \${s}\.channel=/a set \${s}.txpower='$WRT_TXPOWER'" "$WIFI_UC"
+		echo "  txpower 已插入: $WRT_TXPOWER dBm  OK"
+	else
+		echo "  WARN: 未找到 channel 行，txpower 未插入"
+	fi
+
+	# --- SSID / 密码（上游是硬编码字面量） ---
+	if grep -q "ssid='OWRT'" "$WIFI_UC" 2>/dev/null; then
+		sed -i "s/ssid='OWRT'/ssid='$WRT_SSID'/g" "$WIFI_UC"
+		echo "  ssid -> $WRT_SSID  OK"
+	else
+		echo "  WARN: ssid='OWRT' 未找到"
+	fi
+	if grep -q "key='12345678'" "$WIFI_UC" 2>/dev/null; then
+		sed -i "s/key='12345678'/key='$WRT_WORD'/g" "$WIFI_UC"
+		echo "  key -> (已设置)  OK"
+	else
+		echo "  WARN: key='12345678' 未找到"
+	fi
+	sed -i "s/encryption='none'/encryption='psk2+ccmp'/g" "$WIFI_UC"
+
+	echo "  --- 打补丁后的关键行 ---"
+	grep -nE "country \|\||txpower|ssid=|key=" "$WIFI_UC" | sed 's/^/    /'
+
+	# --- 默认信道 ---
+	# 注意：信道默认值【不在】这个文件里，它来自各设备的 DTS（生成 /etc/board.json
+	# 的 default_channel）。本机 phy0 的 default_channel=100 是错的（phy0 禁用
+	# 36-144，只允许 149-165），会让 hostapd 启动失败。这里的 sed 只是尽力而为，
+	# 真正的兜底由 files/etc/uci-defaults/99-ax6600-wifi 完成。
+	if grep -q 'default_channel: 100' "$WIFI_UC" 2>/dev/null; then
+		sed -i 's/default_channel: 100/default_channel: 149/g' "$WIFI_UC"
+		echo "  channel default: 100 -> 149  OK"
+	else
+		echo "  NOTE: 'default_channel: 100' 不在本文件（属正常，信道来自 DTS）；"
+		echo "        信道由 uci-defaults/99-ax6600-wifi 在首次启动时兜底设定"
+	fi
+else
+	echo "ERROR: mac80211.uc/sh not found - wireless defaults NOT patched!"
 fi
 
 CFG_FILE="./package/base-files/files/bin/config_generate"
