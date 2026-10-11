@@ -2,17 +2,26 @@
 #
 # AX6600 storage 数据分区预置（首次启动执行一次）
 #
-# 作用：把 eMMC 上那块 226 GiB 的 storage 分区准备好并开机自动挂载。
+# 作用：把 eMMC 上那块 226 GiB 的 storage 分区准备好并开机自动挂载到 /mnt/storage。
 #
 # ⚠️ 安全设计（很重要）：
 #   1. 分区已存在（带 PARTLABEL="storage"）→ 绝不重新创建、绝不格式化
-#   2. 分区已存在且已有 btrfs → 绝不 mkfs（不会毁数据）
+#   2. 分区已存在且已有文件系统 → 绝不 mkfs（不会毁数据）
 #   3. 只有"分区不存在"时才创建，只有"分区存在但没有文件系统"时才 mkfs
 #   4. 任何一步失败都继续往下走，不会把开机流程卡死
 #
 # 背景：上游的 no-last-partition 分区表把 226 GiB 留在 GPT 之外，
-#       扩展 GPT（sgdisk -e）后新建该分区。sysupgrade 会保留分区表，
-#       所以正常情况下重刷后分区仍在，只需重建挂载脚本。
+#       扩展 GPT（sgdisk -e）后新建该分区。
+#
+# 挂载方式（2026-10-11 改）：
+#   原先用自定义 /etc/init.d/storage 挂载，实测会和 OpenWrt 的 block 服务
+#   打架 —— block 的 anon_mount 会先把它挂到 /mnt/mmcblk0p27，于是同一个
+#   文件系统出现两个挂载点（/mnt/mmcblk0p27 和 /mnt/storage），容易误操作。
+#
+#   现在改用 OpenWrt 标准做法：
+#     - fstab 里按【UUID】指定 target=/mnt/storage（分区号变了也不受影响）
+#     - 关掉 anon_mount，避免再自动挂到 /mnt/<设备名>
+#   由 block 服务（/etc/init.d/fstab，S11fstab）负责挂载，不再自建 init 脚本。
 
 . /lib/functions.sh
 
@@ -26,14 +35,11 @@ log() { echo "ax6600-storage: $*"; }
 
 # ---------- 1) 找现有分区（优先 PARTLABEL，其次扫盘） ----------
 find_part() {
-	# 优先 by-partlabel
 	for p in /dev/disk/by-partlabel/$PARTLABEL; do
 		[ -e "$p" ] && { echo "$p"; return 0; }
 	done
-	# 退而求其次：遍历 mmcblk0 的分区，看 PARTNAME
 	for p in ${DEV}p*; do
 		[ -b "$p" ] || continue
-		# blkid 读 PARTLABEL
 		if blkid "$p" 2>/dev/null | grep -q "PARTLABEL=\"$PARTLABEL\""; then
 			echo "$p"; return 0
 		fi
@@ -49,14 +55,11 @@ if [ -z "$PART" ]; then
 	if ! which sgdisk >/dev/null 2>&1; then
 		log "缺少 sgdisk，跳过（需要 sgdisk 包）"
 	else
-		# 扩展 GPT 到磁盘真实末尾（幂等：已扩展过则不改动）
 		sgdisk -e "$DEV" >/dev/null 2>&1
-		# 新建分区，占满剩余可用空间
 		sgdisk -n 0:0:0 -c 0:$PARTLABEL \
 		       -t 0:1B1720DA-A8BB-4B6F-92D2-0A93AB9609CA \
 		       "$DEV" >/dev/null 2>&1
 		sleep 2
-		# 触发重扫
 		[ -w /sys/block/mmcblk0/device/rescan ] && echo 1 > /sys/block/mmcblk0/device/rescan 2>/dev/null
 		sleep 2
 		PART=$(find_part)
@@ -85,60 +88,71 @@ if [ -n "$PART" ]; then
 	fi
 fi
 
-# ---------- 4) 生成开机自动挂载脚本（UUID 优先，最稳） ----------
-if [ ! -x /etc/init.d/storage ] && [ -n "$PART" ]; then
+# ---------- 4) 用 fstab 配置自动挂载（UUID 匹配，分区号变了也不怕） ----------
+if [ -n "$PART" ]; then
 	FSUUID=$(blkid -s UUID -o value "$PART" 2>/dev/null)
-	log "写入 /etc/init.d/storage（FSUUID=${FSUUID:-无})"
-
-	# 故意用「三次顺序尝试」而不是循环：模板简单，不会出现嵌套转义问题
-	{
-		echo '#!/bin/sh /etc/rc.common'
-		echo '# 自动挂载 eMMC storage 分区到 '"$MOUNTDIR"
-		echo '# 由 uci-defaults 预置生成；优先按 btrfs UUID 挂载（分区号变化也不怕）'
-		echo 'START=99'
-		echo ''
-		echo 'start() {'
-		echo '	mkdir -p '"$MOUNTDIR"
-		echo '	grep -q " '"$MOUNTDIR"' " /proc/mounts && return 0'
-		if [ -n "$FSUUID" ]; then
-			echo '	mount -t '"$FSTYPE"' -U '"$FSUUID"' '"$MOUNTDIR"' 2>/dev/null && return 0'
-		fi
-		echo '	[ -e /dev/disk/by-partlabel/'"$PARTLABEL"' ] && \'
-		echo '		mount -t '"$FSTYPE"' /dev/disk/by-partlabel/'"$PARTLABEL"' '"$MOUNTDIR"' 2>/dev/null && return 0'
-		echo '	[ -b '"$PART"' ] && \'
-		echo '		mount -t '"$FSTYPE"' '"$PART"' '"$MOUNTDIR"' 2>/dev/null && return 0'
-		echo '	logger -t storage "failed to mount '"$MOUNTDIR"'"'
-		echo '}'
-		echo ''
-		echo 'stop() {'
-		echo '	umount '"$MOUNTDIR"' 2>/dev/null || true'
-		echo '}'
-		echo ''
-		echo 'boot() { start; }'
-	} > /etc/init.d/storage
-
-	chmod 755 /etc/init.d/storage
-
-	# 生成后立刻做语法检查，出错要能看见
-	if sh -n /etc/init.d/storage 2>/tmp/_st_err; then
-		log "生成的 init 脚本语法 OK"
-		/etc/init.d/storage enable >/dev/null 2>&1
-		log "已启用开机自挂载: $(ls /etc/rc.d/*storage* 2>/dev/null | tr '\n' ' ')"
+	if [ -z "$FSUUID" ]; then
+		log "取不到 UUID，无法写 fstab，跳过"
 	else
-		log "生成的 init 脚本语法错误: $(cat /tmp/_st_err 2>/dev/null)"
-		log "内容如下，便于排查:"
-		sed 's/^/    /' /etc/init.d/storage
+		# 关掉 anon_mount，避免 block 再把匿名卷挂到 /mnt/<设备名>
+		# （同样不要用引号包值，否则会存成字面引号）
+		ON=1
+		OFF=0
+		if ! uci -q get fstab.@global[0] >/dev/null 2>&1; then
+			uci -q add fstab globals
+		fi
+		uci -q set "fstab.@global[0].anon_mount=$OFF"
+		uci -q set "fstab.@global[0].anon_swap=$OFF"
+
+		# 检查是否已有指向该 UUID 的挂载项
+		# 注意：uci set 的赋值不要写成 "...enabled='1'" —— 双引号里的单引号
+		# 会变成值的字面内容（实测存成 ''1''），这里用变量规避。
+		ON=1
+		EXIST=0
+		i=0
+		while uci -q get "fstab.@mount[$i]" >/dev/null 2>&1; do
+			if [ "$(uci -q get fstab.@mount[$i].uuid)" = "$FSUUID" ]; then
+				EXIST=1
+				uci -q set "fstab.@mount[$i].target=$MOUNTDIR"
+				uci -q set "fstab.@mount[$i].fstype=$FSTYPE"
+				uci -q set "fstab.@mount[$i].enabled=$ON"
+				break
+			fi
+			i=$((i+1))
+		done
+
+		if [ "$EXIST" = "0" ]; then
+			# 找一个可用的索引（跳过 /overlay、/rom 这些系统项）
+			IDX=0
+			while uci -q get "fstab.@mount[$IDX]" >/dev/null 2>&1; do
+				IDX=$((IDX+1))
+			done
+			uci -q add fstab mount
+			uci -q set "fstab.@mount[$IDX].uuid=$FSUUID"
+			uci -q set "fstab.@mount[$IDX].target=$MOUNTDIR"
+			uci -q set "fstab.@mount[$IDX].fstype=$FSTYPE"
+			uci -q set "fstab.@mount[$IDX].options=rw,relatime,ssd,discard=async"
+			uci -q set "fstab.@mount[$IDX].enabled=$ON"
+			log "已写入 fstab: $FSUUID -> $MOUNTDIR"
+		else
+			log "fstab 已有该 UUID 的挂载项，已更新"
+		fi
+		uci -q commit fstab
+
+		# 清理可能存在的旧自定义 init 脚本（避免和 block 重复挂载）
+		if [ -f /etc/init.d/storage ]; then
+			/etc/init.d/storage disable >/dev/null 2>&1
+			rm -f /etc/init.d/storage /etc/rc.d/*storage* 2>/dev/null
+			log "已移除旧的自定义挂载脚本（改由 block 负责）"
+		fi
 	fi
-else
-	log "已存在 /etc/init.d/storage 或分区不可用，跳过生成"
 fi
 
 # ---------- 5) 立即挂载一次（本次开机就能用） ----------
-mkdir -p $MOUNTDIR
+mkdir -p "$MOUNTDIR"
 if ! grep -q " $MOUNTDIR " /proc/mounts; then
-	if [ -x /etc/init.d/storage ]; then
-		/etc/init.d/storage start >/dev/null 2>&1
-	fi
+	block mount >/dev/null 2>&1
+	sleep 2
 fi
 if grep -q " $MOUNTDIR " /proc/mounts; then
 	log "已挂载: $(df -h $MOUNTDIR 2>/dev/null | tail -1)"
