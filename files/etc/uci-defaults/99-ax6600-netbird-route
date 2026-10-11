@@ -1,0 +1,117 @@
+#!/bin/sh
+#
+# 让 LAN 客户端能访问 netbird 隧道内的公司内网
+#
+# 机制（2026-10-11 实测结论）：
+#   netbird 用策略路由：ip rule 110 "not from all fwmark 0x1bd00 lookup netbird"
+#   这条规则对所有源地址生效，LAN 客户端的包在主表查不到 10.x 时会落到它，
+#   从而命中 netbird 表 —— 所以转发本身能通。
+#
+#   但两个前提必须由本脚本保证：
+#     ① 防火墙要放行 lan → netbird 转发（wt0 不属于任何 zone 时，
+#        fw4 的 forward 链最终会落到 handle_reject）
+#     ② 要做 masquerade，否则 LAN 客户端的源地址（如 172.16.10.215）
+#        原样进入隧道，公司侧回包找不到路
+#
+#   另外 netbird 重启会清掉它写在主表里的路由（实测复现），
+#   所以配一个 cron 周期把 netbird 表里的路由镜像回主表。
+#
+# 为什么用 cron 而不是 hotplug：
+#   实测 netbird 创建的 wt0 【不会】触发 /etc/hotplug.d/iface/ 事件
+#   （探针日志为空），所以只能周期同步。
+
+. /lib/functions.sh
+
+log() { echo "ax6600-netbird-route: $*"; }
+
+# ---------- 1) 防火墙：netbird zone + lan→netbird 转发 ----------
+# 注意：uci set 的赋值不要写成 "...='x'" —— 双引号里的单引号会变成
+# 值的字面内容（踩过一次，存成 ''1''，导致 fw4 判为非法值并跳过整个 zone）。
+ACC=ACCEPT
+OFF=0
+ON=1
+
+# 找/建 netbird zone
+ZIDX=""
+i=0
+while uci -q get "firewall.@zone[$i]" >/dev/null 2>&1; do
+	if [ "$(uci -q get firewall.@zone[$i].name)" = "netbird" ]; then
+		ZIDX=$i
+		break
+	fi
+	i=$((i+1))
+done
+
+if [ -z "$ZIDX" ]; then
+	uci -q add firewall zone
+	ZIDX=$((i))
+	log "新建 netbird zone (index $ZIDX)"
+else
+	log "netbird zone 已存在 (index $ZIDX)，更新"
+fi
+
+uci -q set "firewall.@zone[$ZIDX].name=netbird"
+uci -q set "firewall.@zone[$ZIDX].device=wt0"
+uci -q set "firewall.@zone[$ZIDX].input=$ACC"
+uci -q set "firewall.@zone[$ZIDX].output=$ACC"
+uci -q set "firewall.@zone[$ZIDX].forward=$ACC"
+uci -q set "firewall.@zone[$ZIDX].masq=$ON"
+
+# 找/建 lan -> netbird 转发
+HASFWD=0
+i=0
+while uci -q get "firewall.@forwarding[$i]" >/dev/null 2>&1; do
+	if [ "$(uci -q get firewall.@forwarding[$i].src)" = "lan" ] && \
+	   [ "$(uci -q get firewall.@forwarding[$i].dest)" = "netbird" ]; then
+		HASFWD=1
+		break
+	fi
+	i=$((i+1))
+done
+
+if [ "$HASFWD" = "0" ]; then
+	uci -q add firewall forwarding
+	uci -q set "firewall.@forwarding[-1].src=lan"
+	uci -q set "firewall.@forwarding[-1].dest=netbird"
+	log "新建 forwarding: lan -> netbird"
+else
+	log "forwarding lan -> netbird 已存在"
+fi
+
+uci -q commit firewall
+log "防火墙配置已提交"
+
+# 立刻重载，让规则生效（失败也不阻塞开机）
+/etc/init.d/firewall reload >/dev/null 2>&1
+log "防火墙已重载"
+
+# ---------- 2) 路由同步脚本 + cron ----------
+# /usr/bin/netbird-route-sync 由本仓库的 files/usr/bin/ 提供（构建时打包）。
+# 这里只负责确保可执行、并挂上 cron。
+if [ -f /usr/bin/netbird-route-sync ]; then
+	chmod 755 /usr/bin/netbird-route-sync
+	log "netbird-route-sync 已确认可执行"
+else
+	log "⚠️ 未找到 /usr/bin/netbird-route-sync（构建时可能没打包进来）"
+fi
+
+CRON=/etc/crontabs/root
+touch "$CRON"
+if grep -q 'netbird-route-sync' "$CRON" 2>/dev/null; then
+	log "cron 任务已存在"
+else
+	echo '* * * * * /usr/bin/netbird-route-sync' >> "$CRON"
+	log "已添加 cron 任务（每分钟同步路由）"
+fi
+/etc/init.d/cron restart >/dev/null 2>&1
+log "cron 已重启"
+
+# ---------- 3) 立即同步一次（本次开机就能用） ----------
+if [ -x /usr/bin/netbird-route-sync ]; then
+	/usr/bin/netbird-route-sync
+	sleep 1
+	CNT=$(ip route show table main 2>/dev/null | grep -cE '^10\.')
+	log "主表当前 10.x 路由数: $CNT（netbird 还没连上时为 0，cron 会补）"
+fi
+
+exit 0

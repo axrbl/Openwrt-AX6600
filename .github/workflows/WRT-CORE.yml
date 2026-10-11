@@ -272,6 +272,14 @@ jobs:
                 echo "  init.d ready: $F"
               done
             fi
+            # files/usr/bin 下的工具（如 netbird-route-sync）需要可执行权限。
+            # git 会记录可执行位，但这里再显式 chmod 一次，避免检出时丢失。
+            if [ -d ./files/usr/bin ]; then
+              for F in $(find ./files/usr/bin -type f 2>/dev/null); do
+                chmod 755 "$F"
+                echo "  usr/bin ready: $F (mode $(stat -c '%a' "$F" 2>/dev/null || echo '?'))"
+              done
+            fi
 
             echo "  --- files/ 内容 ---"
             find ./files -type f | sed 's/^/  file: /'

@@ -1,0 +1,54 @@
+#!/bin/sh
+#
+# 保证 LAN 客户端能访问 netbird 隧道内的公司内网
+#
+# 机制说明（实测结论）：
+#   netbird 用策略路由：ip rule 110 "not from all fwmark 0x1bd00 lookup netbird"
+#   这条规则【对所有源地址】生效。LAN 客户端的包在主表里查不到 10.x 时，
+#   会落到 rule 110 去查 netbird 表，从而命中隧道。
+#
+#   但 netbird 重启会清掉主表里的镜像路由（实测），此时依赖上面这条回退；
+#   为稳妥起见，本脚本周期性地把 netbird 表里的 wt0 路由镜像进主表，
+#   让选路更直接、也不依赖 rule 的细节。
+#
+# 为什么用 cron 而不是 hotplug：
+#   实测 hotplug（/etc/hotplug.d/iface/）【不会】为 netbird 创建的 wt0 触发事件，
+#   探针日志为空。所以改用 cron 周期执行，简单且可靠。
+#
+# 幂等：已存在则跳过；netbird 表为空时清理镜像，避免留下指向死接口的路由。
+
+LOG_TAG=netbird-routes
+NB_IFACE=wt0
+
+log() { logger -t "$LOG_TAG" "$*"; }
+
+# 接口不存在则清理镜像并退出
+if [ ! -d "/sys/class/net/$NB_IFACE" ]; then
+    for N in $(ip route show table main 2>/dev/null | awk '/dev wt0/ && $1 ~ /^[0-9]/ {print $1}'); do
+        ip route del "$N" dev "$NB_IFACE" 2>/dev/null
+    done
+    exit 0
+fi
+
+# netbird 表里的公司网段（只取数字开头的目标）
+NETS=$(ip route show table netbird 2>/dev/null | awk '/dev wt0/ {print $1}' | grep -E '^[0-9]')
+
+# 清理主表里已有的镜像路由（先清后加，保证与 netbird 表一致）
+CLEANED=0
+for N in $(ip route show table main 2>/dev/null | awk '/dev wt0/ && $1 ~ /^[0-9]/ {print $1}'); do
+    # 跳过 netbird 隧道自身网段（内核自动维护，不能删）
+    case "$N" in 100.64.0.0/16) continue ;; esac
+    ip route del "$N" dev "$NB_IFACE" 2>/dev/null && CLEANED=$((CLEANED+1))
+done
+
+[ -z "$NETS" ] && exit 0
+
+ADDED=0
+for N in $NETS; do
+    ip route add "$N" dev "$NB_IFACE" scope link 2>/dev/null && ADDED=$((ADDED+1))
+done
+
+# 只在有变化时记日志，避免每分钟刷屏
+if [ "$ADDED" -gt 0 ] || [ "$CLEANED" -gt 0 ]; then
+    log "路由同步: 新增 $ADDED 清理 $CLEANED ($(echo $NETS | tr '\n' ' '))"
+fi
